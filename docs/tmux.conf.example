@@ -1,0 +1,19 @@
+# claude-orchestrator tmux integration — copy what you want into ~/.tmux.conf
+
+# --- live status widget ---------------------------------------------------
+# Shows colored counts of WORKING / IDLE / WAITING_PERMISSION / etc., updated
+# every 2 seconds. The `cco tmux-widget` command emits tmux-format colour
+# escapes so it integrates cleanly with status-right.
+set -g status-interval 2
+set -g status-right '#(cco tmux-widget) | %H:%M %d-%b'
+
+# --- highlight active windows ---------------------------------------------
+# Make a tmux window pulse when its contents change so you can spot a
+# session that just printed something even if you're looking elsewhere.
+setw -g monitor-activity on
+setw -g monitor-bell     on
+set  -g visual-activity  off
+set  -g visual-bell      off
+
+# --- optional: scroll-back generosity for long claude sessions ------------
+set -g history-limit 50000

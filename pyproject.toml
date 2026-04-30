@@ -1,0 +1,104 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-orchestrator"
+version = "0.0.0"
+description = "Linux-native dashboard + lifecycle orchestrator for Claude Code sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Brad Bissell" }]
+keywords = ["claude-code", "tmux", "dashboard", "linux", "orchestrator"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Terminals",
+]
+dependencies = [
+    # Hard runtime deps. Keep this list short.
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+tui = [
+    "textual>=0.80",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+cco = "claude_orchestrator.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bbissell/claude-orchestrator"
+Issues = "https://github.com/bbissell/claude-orchestrator/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_orchestrator"]
+
+# Include the shell hook handlers in the wheel so installer.py can find them.
+[tool.hatch.build.targets.wheel.shared-data]
+"src/claude_orchestrator/hooks" = "share/claude-orchestrator/hooks"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "SIM", # simplify
+    "S",   # bandit (security)
+    "BLE", # blind-except (no `except Exception: pass`)
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501", # line-too-long handled by formatter
+    "S101", # asserts ok in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S108", "S603", "S607"]
+"src/claude_orchestrator/tmux/navigator.py" = ["S603", "S607"]
+"src/claude_orchestrator/tmux/discover.py" = ["S603", "S607"]
+"src/claude_orchestrator/hooks/installer.py" = ["S603"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "strict"
+xfail_strict = true

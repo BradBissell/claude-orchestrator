@@ -1,0 +1,262 @@
+"""Tests for the hook installer.
+
+Critical property: install → uninstall round-trip must be byte-identical when
+the user has no other hooks, AND must preserve all non-cco hook entries when
+they coexist.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from claude_orchestrator.hooks import installer
+
+
+@pytest.fixture
+def fake_handler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Bundle a fake handler script so installer.handler_path resolves cleanly."""
+    handler = tmp_path / "fake_event_handler.sh"
+    handler.write_text("#!/bin/sh\nexit 0\n")
+    handler.chmod(0o755)
+    monkeypatch.setattr(installer, "hook_handler_path", lambda: handler)
+    return handler
+
+
+@pytest.fixture
+def settings_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    p = tmp_path / "settings.json"
+    monkeypatch.setattr(installer, "claude_settings_path", lambda: p)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# install
+# ---------------------------------------------------------------------------
+
+
+def test_install_into_empty_settings(settings_path: Path, fake_handler: Path) -> None:
+    plan = installer.install(dry_run=False)
+    assert plan.events_to_add == list(installer.CCO_EVENTS)
+    assert plan.events_already_installed == []
+    assert plan.backup_path is not None  # backup of "empty" file (sentinel)
+
+    data = json.loads(settings_path.read_text())
+    assert "hooks" in data
+    for event in installer.CCO_EVENTS:
+        assert event in data["hooks"]
+        entries = data["hooks"][event]
+        assert any(str(fake_handler) in h["hooks"][0]["command"] for h in entries)
+
+
+def test_install_dry_run_does_not_write(settings_path: Path, fake_handler: Path) -> None:
+    plan = installer.install(dry_run=True)
+    assert plan.events_to_add == list(installer.CCO_EVENTS)
+    assert not settings_path.exists()
+
+
+def test_install_idempotent(settings_path: Path, fake_handler: Path) -> None:
+    installer.install()
+    plan = installer.install()  # second time should be a no-op
+    assert plan.events_to_add == []
+    assert sorted(plan.events_already_installed) == sorted(installer.CCO_EVENTS)
+
+
+def test_install_preserves_existing_hooks(settings_path: Path, fake_handler: Path) -> None:
+    # Simulate the user's actual ~/.claude/settings.json with gsd-* hooks.
+    pre = {
+        "permissions": {"defaultMode": "auto"},
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Grep|Glob|Read|Search",
+                    "hooks": [{"type": "command", "command": "/path/to/gsd-guard.js"}],
+                }
+            ],
+            "Stop": [
+                {
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": "/path/to/gsd-stop.sh"}],
+                }
+            ],
+        },
+        "statusLine": {"type": "command", "command": "/path/to/statusline.js"},
+    }
+    settings_path.write_text(json.dumps(pre, indent=2))
+    installer.install()
+
+    data = json.loads(settings_path.read_text())
+    # Existing entries remain (first in list is the user's gsd entry).
+    assert data["permissions"] == {"defaultMode": "auto"}
+    assert data["statusLine"]["command"] == "/path/to/statusline.js"
+    pre_tool_cmds = [h["hooks"][0]["command"] for h in data["hooks"]["PreToolUse"]]
+    assert "/path/to/gsd-guard.js" in pre_tool_cmds
+    assert any(str(fake_handler) in c for c in pre_tool_cmds)
+
+
+# ---------------------------------------------------------------------------
+# uninstall
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_removes_all_cco_entries(settings_path: Path, fake_handler: Path) -> None:
+    installer.install()
+    plan = installer.uninstall()
+    assert sorted(plan.events_with_cco_hook) == sorted(installer.CCO_EVENTS)
+
+    data = json.loads(settings_path.read_text()) if settings_path.read_text() else {}
+    # No "hooks" key when nothing else was using it.
+    assert "hooks" not in data
+
+
+def test_uninstall_dry_run_does_not_write(settings_path: Path, fake_handler: Path) -> None:
+    installer.install()
+    before = settings_path.read_bytes()
+    plan = installer.uninstall(dry_run=True)
+    assert sorted(plan.events_with_cco_hook) == sorted(installer.CCO_EVENTS)
+    assert settings_path.read_bytes() == before
+
+
+def test_uninstall_preserves_other_hooks(settings_path: Path, fake_handler: Path) -> None:
+    pre = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Grep",
+                    "hooks": [{"type": "command", "command": "/x/gsd.js"}],
+                }
+            ]
+        }
+    }
+    settings_path.write_text(json.dumps(pre, indent=2))
+    installer.install()
+    installer.uninstall()
+    data = json.loads(settings_path.read_text())
+    pre_tool = data["hooks"]["PreToolUse"]
+    assert len(pre_tool) == 1
+    assert pre_tool[0]["hooks"][0]["command"] == "/x/gsd.js"
+
+
+# ---------------------------------------------------------------------------
+# property: byte-identical roundtrip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        # No prior hooks at all — empty file.
+        {},
+        # Only unrelated keys.
+        {
+            "permissions": {"defaultMode": "auto"},
+            "statusLine": {"type": "command", "command": "/x"},
+        },
+        # Existing gsd-style hooks, no cco.
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Grep", "hooks": [{"type": "command", "command": "/x/gsd.js"}]}
+                ],
+                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/x/stop.sh"}]}],
+            }
+        },
+        # Mixed: existing hooks + extra config keys.
+        {
+            "permissions": {"defaultMode": "auto"},
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/a/b.sh"}]}
+                ]
+            },
+            "statusLine": {"type": "command", "command": "/x"},
+        },
+    ],
+)
+def test_install_uninstall_roundtrip_preserves_user_hooks(
+    settings_path: Path,
+    fake_handler: Path,
+    scenario: dict,
+) -> None:
+    """install → uninstall must restore the user's hooks dict exactly."""
+    if scenario:
+        settings_path.write_text(json.dumps(scenario, indent=2) + "\n")
+    before_user_hooks = scenario.get("hooks", {})
+    before_other = {k: v for k, v in scenario.items() if k != "hooks"}
+
+    installer.install()
+    installer.uninstall()
+
+    if not settings_path.exists() or not settings_path.read_text().strip():
+        # File only ever contained cco hooks → uninstall correctly removed it
+        # OR the file remained empty.
+        assert not before_user_hooks, "cleared file but user had hooks"
+        assert not before_other, "cleared file but user had other config"
+        return
+
+    after = json.loads(settings_path.read_text())
+    after_hooks = after.get("hooks", {})
+    after_other = {k: v for k, v in after.items() if k != "hooks"}
+
+    assert after_other == before_other, "non-hook config keys must be preserved"
+    assert after_hooks == before_user_hooks, "user hooks must be preserved exactly"
+
+
+# ---------------------------------------------------------------------------
+# atomic write + backup behavior
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_write_creates_file_with_0600(tmp_path: Path) -> None:
+    p = tmp_path / "x"
+    installer._atomic_write(p, "hello\n")
+    assert p.read_text() == "hello\n"
+    mode = p.stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_atomic_write_no_tempfile_left_on_disk(tmp_path: Path) -> None:
+    p = tmp_path / "x"
+    installer._atomic_write(p, "hi\n")
+    leftovers = [q for q in tmp_path.iterdir() if q.name.startswith(".x.")]
+    assert leftovers == []
+
+
+def test_install_creates_backup(settings_path: Path, fake_handler: Path) -> None:
+    settings_path.write_text("{}\n")
+    plan = installer.install()
+    assert plan.backup_path is not None
+    assert plan.backup_path.exists()
+    assert plan.backup_path.read_text() == "{}\n"
+
+
+def test_backups_rotate_to_keep_last_three(settings_path: Path, fake_handler: Path) -> None:
+    settings_path.write_text("{}\n")
+    # Run install/uninstall cycles to accumulate backups.
+    for _ in range(5):
+        installer.install()
+        installer.uninstall()
+
+    backups = sorted(settings_path.parent.glob(f"{settings_path.name}.bak.*"))
+    assert len(backups) <= installer.BACKUP_KEEP
+
+
+def test_restore_backup(settings_path: Path, fake_handler: Path) -> None:
+    settings_path.write_text('{"original": true}\n')
+    installer.install()
+    # Sanity: cco hooks are now in the file.
+    assert "hooks" in json.loads(settings_path.read_text())
+
+    restored = installer.restore_backup()
+    assert restored is not None
+    data = json.loads(settings_path.read_text())
+    assert data == {"original": True}
+
+
+def test_restore_backup_with_no_backup_returns_none(
+    settings_path: Path, fake_handler: Path
+) -> None:
+    # No prior install → no backups exist.
+    assert installer.restore_backup() is None
