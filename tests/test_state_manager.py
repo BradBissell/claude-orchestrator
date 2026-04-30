@@ -76,3 +76,62 @@ def test_get_summary_aggregates(tmp_path: Path) -> None:
     assert summary.working == 2
     assert summary.waiting_permission == 1
     assert summary.total == 3
+
+
+# ---------------------------------------------------------------------------
+# liveness check (claude_pid → DEAD when process is gone)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_marks_dead_when_pid_not_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_orchestrator.state import manager as mgr_mod
+
+    _write_state(tmp_path, "ghost", status=AgentStatus.WORKING, claude_pid=99999999)
+
+    # Simulate the pid being dead.
+    monkeypatch.setattr(mgr_mod, "_is_pid_alive", lambda pid: False)
+
+    agents = StateManager(tmp_path).scan()
+    assert agents[0].status is AgentStatus.DEAD
+
+
+def test_scan_keeps_status_when_pid_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from claude_orchestrator.state import manager as mgr_mod
+
+    _write_state(tmp_path, "alive", status=AgentStatus.WORKING, claude_pid=42)
+    monkeypatch.setattr(mgr_mod, "_is_pid_alive", lambda pid: True)
+
+    agents = StateManager(tmp_path).scan()
+    assert agents[0].status is AgentStatus.WORKING
+
+
+def test_scan_keeps_status_when_pid_unknown(tmp_path: Path) -> None:
+    """No claude_pid recorded → can't tell, leave status as-is."""
+    _write_state(tmp_path, "noinfo", status=AgentStatus.WORKING)  # claude_pid None
+    agents = StateManager(tmp_path).scan()
+    assert agents[0].status is AgentStatus.WORKING
+
+
+def test_is_pid_alive_with_self() -> None:
+    """Self-test: our own pid should always read as alive."""
+    import os
+
+    from claude_orchestrator.state.manager import _is_pid_alive
+
+    assert _is_pid_alive(os.getpid()) is True
+
+
+def test_is_pid_alive_with_zero() -> None:
+    from claude_orchestrator.state.manager import _is_pid_alive
+
+    assert _is_pid_alive(0) is False
+
+
+def test_is_pid_alive_with_obviously_dead() -> None:
+    """A reasonably-large pid that almost certainly doesn't exist."""
+    from claude_orchestrator.state.manager import _is_pid_alive
+
+    # 2^22 is below typical max_pid but generally unused.
+    assert _is_pid_alive(4194301) is False

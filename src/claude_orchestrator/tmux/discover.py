@@ -24,14 +24,16 @@ MAX_ANCESTOR_DEPTH = 32
 
 @dataclass(frozen=True)
 class TmuxPaneInfo:
-    """tmux fields we care about for navigation, plus the claude pid we
-    matched against (for callers that want to verify liveness)."""
+    """tmux fields we care about for navigation, plus liveness identifiers."""
 
     tmux_session: str
     tmux_window: str
     tmux_pane: str
     claude_pid: int
     cwd: str
+    # Session-id parsed out of `claude --resume <sid>` argv; None for
+    # fresh sessions that didn't use --resume.
+    session_id: str | None = None
 
 
 def has_tmux() -> bool:
@@ -102,6 +104,28 @@ def _read_proc_ppid(pid: int) -> int | None:
     return None
 
 
+_VALID_SID = set("0123456789abcdefABCDEF-")
+
+
+def _read_session_id_from_cmdline(pid: int) -> str | None:
+    """If claude was launched as `claude --resume <sid>` (or `-r <sid>`),
+    extract the session_id from /proc/<pid>/cmdline. Returns None for
+    fresh sessions or unreadable cmdlines."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")
+    except OSError:
+        return None
+    for i, arg in enumerate(argv):
+        if arg in (b"--resume", b"-r") and i + 1 < len(argv):
+            sid = argv[i + 1].decode(errors="ignore").strip()
+            # UUID-shaped (lower/upper hex + dashes). Reject anything else
+            # so a bogus argv can't map to a state-file path-traversal.
+            if sid and 8 <= len(sid) <= 64 and all(c in _VALID_SID for c in sid):
+                return sid.lower()
+    return None
+
+
 def _walk_to_tmux_pane(
     start_pid: int, pane_pids: dict[int, tuple[str, str, str]]
 ) -> tuple[str, str, str] | None:
@@ -149,6 +173,7 @@ def discover_panes() -> list[TmuxPaneInfo]:
                 tmux_pane=pane,
                 claude_pid=cpid,
                 cwd=cwd,
+                session_id=_read_session_id_from_cmdline(cpid),
             )
         )
     return discovered
@@ -178,6 +203,9 @@ def enrich_state_files(state_dir: Path) -> int:
         return 0
 
     by_pid: dict[int, TmuxPaneInfo] = {info.claude_pid: info for info in discovered}
+    by_sid: dict[str, TmuxPaneInfo] = {
+        info.session_id: info for info in discovered if info.session_id
+    }
 
     cwd_counts: dict[str, int] = {}
     for info in discovered:
@@ -195,32 +223,54 @@ def enrich_state_files(state_dir: Path) -> int:
         except (OSError, ValueError):
             continue
 
-        # Match priority 1: recorded claude_pid (unambiguous).
+        # Match priority:
+        #   1. session_id parsed from `claude --resume <sid>` argv (definitive)
+        #   2. recorded claude_pid in state file (definitive)
+        #   3. unique cwd (best-effort; ambiguous cwds are skipped)
         match: TmuxPaneInfo | None = None
-        recorded_pid = data.get("claude_pid")
-        if isinstance(recorded_pid, int) and recorded_pid in by_pid:
-            match = by_pid[recorded_pid]
+        is_definitive = False
+
+        sid = data.get("session_id")
+        if isinstance(sid, str) and sid in by_sid:
+            match = by_sid[sid]
+            is_definitive = True
         else:
-            # Match priority 2: unique cwd.
-            cwd = data.get("cwd")
-            if cwd:
-                match = by_unique_cwd.get(cwd)
+            recorded_pid = data.get("claude_pid")
+            if isinstance(recorded_pid, int) and recorded_pid in by_pid:
+                match = by_pid[recorded_pid]
+                is_definitive = True
+            else:
+                cwd = data.get("cwd")
+                if cwd:
+                    match = by_unique_cwd.get(cwd)
         if match is None:
             continue
 
-        # Only overwrite when fields are absent — don't clobber a fresher
-        # mapping that the hook handler might have just written.
-        changed = False
-        for field in ("tmux_session", "tmux_window", "tmux_pane"):
-            if not data.get(field):
-                changed = True
-        if not changed:
+        # Decide whether to overwrite:
+        #   - Definitive match (sid or pid): always overwrite, even if the
+        #     existing value is "populated" (because our prior best-effort
+        #     match could have written wrong info).
+        #   - cwd-only match: only fill in absent or corrupt fields.
+        existing = (
+            data.get("tmux_session"),
+            data.get("tmux_window"),
+            data.get("tmux_pane"),
+        )
+        new_values = (match.tmux_session, match.tmux_window, match.tmux_pane)
+        if not is_definitive:
+            # Treat the pre-fix "sess\twin\tpane" concat string as corrupt.
+            corrupt = any(v and ("\t" in v or "	" in v) for v in existing if isinstance(v, str))
+            empty = not all(existing)
+            if not (corrupt or empty):
+                continue
+        elif existing == new_values:
             continue
 
         data["tmux_session"] = match.tmux_session
         data["tmux_window"] = match.tmux_window
         data["tmux_pane"] = match.tmux_pane
-        # Also record the discovered claude_pid if the file was missing it.
+        # Backfill claude_pid + session_id when missing — speeds up future
+        # lookups by promoting them into the definitive-match channels.
         if not data.get("claude_pid"):
             data["claude_pid"] = match.claude_pid
 
