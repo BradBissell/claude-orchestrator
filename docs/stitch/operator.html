@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>cco-sys-v1.0 | OPERATOR REQUIRED</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+            font-size: 1.2em;
+        }
+        body {
+            background-color: #0e1116;
+            color: #dbe4e3;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .blink {
+            animation: blinker 1s step-start infinite;
+        }
+        @keyframes blinker {
+            50% { opacity: 0; }
+        }
+        .glow-red {
+            text-shadow: 0 0 8px #ffb4ab;
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0e1116;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2e3636;
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "tertiary-container": "#fce442",
+                        "inverse-primary": "#006a6a",
+                        "on-surface-variant": "#b9cac9",
+                        "surface": "#0d1515",
+                        "tertiary-fixed": "#fce442",
+                        "on-error-container": "#ffdad6",
+                        "tertiary": "#ffffff",
+                        "surface-container-lowest": "#071010",
+                        "surface-container-low": "#151d1d",
+                        "outline": "#839493",
+                        "surface-container-highest": "#2e3636",
+                        "on-tertiary": "#383100",
+                        "surface-bright": "#323b3b",
+                        "background": "#0d1515",
+                        "primary-fixed": "#00fbfb",
+                        "on-surface": "#dbe4e3",
+                        "secondary-container": "#474c54",
+                        "secondary-fixed-dim": "#c2c7d0",
+                        "surface-variant": "#2e3636",
+                        "inverse-on-surface": "#293232",
+                        "on-primary-container": "#007070",
+                        "inverse-surface": "#dbe4e3",
+                        "error": "#ffb4ab",
+                        "surface-tint": "#00dddd",
+                        "on-error": "#690005",
+                        "secondary": "#c2c7d0",
+                        "on-tertiary-fixed-variant": "#504700",
+                        "secondary-fixed": "#dee2ed",
+                        "outline-variant": "#3a4a49",
+                        "on-secondary-fixed": "#171c23",
+                        "on-primary": "#003737",
+                        "surface-dim": "#0d1515",
+                        "surface-container-high": "#232c2b",
+                        "on-secondary-fixed-variant": "#42474f",
+                        "primary-container": "#00fbfb",
+                        "primary": "#ffffff",
+                        "tertiary-fixed-dim": "#dec723",
+                        "surface-container": "#192121",
+                        "on-tertiary-container": "#716500",
+                        "on-primary-fixed": "#002020",
+                        "on-primary-fixed-variant": "#004f4f",
+                        "on-tertiary-fixed": "#201c00",
+                        "error-container": "#93000a",
+                        "on-secondary": "#2c3138",
+                        "on-secondary-container": "#b7bcc6",
+                        "primary-fixed-dim": "#00dddd",
+                        "on-background": "#dbe4e3"
+                    },
+                    "fontFamily": {
+                        "label-sm": ["JetBrains Mono"],
+                        "header-main": ["JetBrains Mono"],
+                        "body-mono": ["JetBrains Mono"]
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-[#0e1116] text-[#dbe4e3] selection:bg-primary-container selection:text-on-primary-container">
+<!-- TopAppBar -->
+<header class="fixed top-0 left-0 w-full z-50 flex justify-between items-center h-12 px-2 max-w-[50ch] mx-auto bg-[#0e1116] border-b border-gray-800 font-mono uppercase tracking-widest text-xs">
+<div class="text-cyan-400 font-bold text-xl font-mono">cco</div>
+<nav class="flex gap-4">
+<span class="text-cyan-400 border-b-2 border-cyan-400 cursor-pointer">[ ● WORK ]</span>
+<span class="text-gray-500 hover:bg-cyan-900/30 hover:text-cyan-200 cursor-pointer">[ ☠ ERR ]</span>
+<span class="text-gray-500 hover:bg-cyan-900/30 hover:text-cyan-200 cursor-pointer">[ ◌ WAIT ]</span>
+<span class="text-gray-500 hover:bg-cyan-900/30 hover:text-cyan-200 cursor-pointer">[ █ IDLE ]</span>
+</nav>
+<div class="flex gap-2">
+<span class="material-symbols-outlined text-cyan-400 cursor-pointer">schedule</span>
+<span class="material-symbols-outlined text-cyan-400 cursor-pointer">refresh</span>
+</div>
+</header>
+<main class="pt-16 pb-12 px-4 max-w-[50ch] mx-auto min-h-screen">
+<!-- System Alert Banner -->
+<div class="border border-error p-2 mb-6 bg-error/5">
+<div class="flex justify-between items-center font-bold text-error">
+<span>[ ! ] ATTENTION REQUIRED</span>
+<span class="blink">●</span>
+</div>
+<div class="text-[10px] mt-1 text-on-surface-variant">
+                CRITICAL PERMISSION BLOCKS DETECTED IN SESSION POOL.
+            </div>
+</div>
+<!-- Session Monitor Container -->
+<div class="font-mono text-sm leading-relaxed">
+<div class="flex justify-between border-b border-gray-800 pb-1 mb-2 text-gray-500 text-[10px]">
+<span>ID</span>
+<span>STATUS</span>
+<span>RESOURCE</span>
+</div>
+<!-- ROW 1: PERM (SELECTED) -->
+<div class="bg-primary-container/10 border-l-2 border-cyan-400 mb-1">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#001</span>
+<span class="text-error/70 font-bold"><span class="blink">●</span> PERM</span>
+<span class="text-on-surface">SYS_ROOT_EXEC</span>
+</div>
+<div class="px-1 pb-1 text-[11px] text-cyan-400 opacity-80 italic">
+                    ◂ Bash: rm -rf node_modules &amp;&amp; npm install
+                </div>
+</div>
+<!-- ROW 2: PERM -->
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#002</span>
+<span class="text-error/70 font-bold"><span class="blink">●</span> PERM</span>
+<span class="text-on-surface">DB_MIGRATE</span>
+</div>
+<div class="px-1 pb-1 text-[11px] text-cyan-400 opacity-80 italic">
+                    ◂ SQL: ALTER TABLE sessions ADD COLUMN metadata JSONB
+                </div>
+</div>
+<!-- ROW 3: ERR -->
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#003</span>
+<span class="text-outline font-bold">ERR</span>
+<span class="text-on-surface">TIMEOUT_OOM</span>
+</div>
+</div>
+<!-- ROW 4: WAIT -->
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#004</span>
+<span class="text-on-surface-variant font-bold">WAIT</span>
+<span class="text-on-surface">TCP_HANDSHAKE</span>
+</div>
+</div>
+<!-- WORKING ROWS -->
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#005</span>
+<span class="text-green-500 font-bold">▶ WORK</span>
+<span class="text-on-surface">LOG_STREAM</span>
+</div>
+</div>
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#006</span>
+<span class="text-green-500 font-bold">▶ WORK</span>
+<span class="text-on-surface">G_COLLECT</span>
+</div>
+</div>
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#007</span>
+<span class="text-green-500 font-bold">▶ WORK</span>
+<span class="text-on-surface">ID_AUTH</span>
+</div>
+</div>
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5">
+<span class="text-primary-fixed">#008</span>
+<span class="text-green-500 font-bold">▶ WORK</span>
+<span class="text-on-surface">METRIC_PULL</span>
+</div>
+</div>
+<!-- IDLE ROWS -->
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5 text-gray-500">
+<span>#009</span>
+<span>◌ IDLE</span>
+<span>P_RESERVE</span>
+</div>
+</div>
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5 text-gray-500">
+<span>#010</span>
+<span>◌ IDLE</span>
+<span>P_RESERVE</span>
+</div>
+</div>
+<div class="mb-1 border-l-2 border-transparent">
+<div class="flex justify-between px-1 py-0.5 text-gray-500">
+<span>#011</span>
+<span>◌ IDLE</span>
+<span>P_RESERVE</span>
+</div>
+</div>
+<!-- DEAD ROWS -->
+<div class="mb-1 border-l-2 border-transparent opacity-40">
+<div class="flex justify-between px-1 py-0.5 text-gray-600">
+<span>#012</span>
+<span>☠ DEAD</span>
+<span>ZOMBIE_PROC</span>
+</div>
+</div>
+<div class="mb-1 border-l-2 border-transparent opacity-40">
+<div class="flex justify-between px-1 py-0.5 text-gray-600">
+<span>#013</span>
+<span>☠ DEAD</span>
+<span>ZOMBIE_PROC</span>
+</div>
+</div>
+</div>
+<!-- ASCII Footer Separator -->
+<div class="mt-8 text-gray-800 text-[8px] leading-[4px] whitespace-pre overflow-hidden">
++--------------------------------------------------+
+| SESSION_POOL_DUMP_0x4F92                         |
++--------------------------------------------------+
+        </div>
+</main>
+<!-- Footer -->
+<footer class="fixed bottom-0 left-0 w-full z-50 flex justify-between items-center h-6 px-2 max-w-[50ch] mx-auto bg-[#0e1116] border-t border-gray-800 font-mono text-[10px] leading-tight">
+<div class="text-cyan-400 font-mono">cco-sys-v1.0</div>
+<div class="flex gap-3">
+<span class="text-gray-600 hover:text-cyan-300 cursor-pointer">F1 HELP</span>
+<span class="text-gray-600 hover:text-cyan-300 cursor-pointer">F5 REFRESH</span>
+<span class="text-gray-600 hover:text-cyan-300 cursor-pointer">F10 QUIT</span>
+<span class="bg-cyan-400 text-[#0e1116] px-1 font-bold cursor-pointer">K KILL</span>
+</div>
+</footer>
+</body></html>

@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>cco-sys-v1.0 | Fleet Monitor</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+            font-size: 14px;
+        }
+        body {
+            background-color: #0d1515;
+            color: #dbe4e3;
+            font-family: 'JetBrains Mono', monospace;
+            cursor: crosshair;
+        }
+        .box-drawing {
+            line-height: 1.2;
+            letter-spacing: -0.05em;
+        }
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0d1515;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2e3636;
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "tertiary-container": "#fce442",
+                        "inverse-primary": "#006a6a",
+                        "on-surface-variant": "#b9cac9",
+                        "surface": "#0d1515",
+                        "tertiary-fixed": "#fce442",
+                        "on-error-container": "#ffdad6",
+                        "tertiary": "#ffffff",
+                        "surface-container-lowest": "#071010",
+                        "surface-container-low": "#151d1d",
+                        "outline": "#839493",
+                        "surface-container-highest": "#2e3636",
+                        "on-tertiary": "#383100",
+                        "surface-bright": "#323b3b",
+                        "background": "#0d1515",
+                        "primary-fixed": "#00fbfb",
+                        "on-surface": "#dbe4e3",
+                        "secondary-container": "#474c54",
+                        "secondary-fixed-dim": "#c2c7d0",
+                        "surface-variant": "#2e3636",
+                        "inverse-on-surface": "#293232",
+                        "on-primary-container": "#007070",
+                        "inverse-surface": "#dbe4e3",
+                        "error": "#ffb4ab",
+                        "surface-tint": "#00dddd",
+                        "on-error": "#690005",
+                        "secondary": "#c2c7d0",
+                        "on-tertiary-fixed-variant": "#504700",
+                        "secondary-fixed": "#dee2ed",
+                        "outline-variant": "#3a4a49",
+                        "on-secondary-fixed": "#171c23",
+                        "on-primary": "#003737",
+                        "surface-dim": "#0d1515",
+                        "surface-container-high": "#232c2b",
+                        "on-secondary-fixed-variant": "#42474f",
+                        "primary-container": "#00fbfb",
+                        "primary": "#ffffff",
+                        "tertiary-fixed-dim": "#dec723",
+                        "surface-container": "#192121",
+                        "on-tertiary-container": "#716500",
+                        "on-primary-fixed": "#002020",
+                        "on-primary-fixed-variant": "#004f4f",
+                        "on-tertiary-fixed": "#201c00",
+                        "error-container": "#93000a",
+                        "on-secondary": "#2c3138",
+                        "on-secondary-container": "#b7bcc6",
+                        "primary-fixed-dim": "#00dddd",
+                        "on-background": "#dbe4e3"
+                    },
+                    "fontFamily": {
+                        "label-sm": ["JetBrains Mono"],
+                        "header-main": ["JetBrains Mono"],
+                        "body-mono": ["JetBrains Mono"]
+                    },
+                    "fontSize": {
+                        "label-sm": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                        "header-main": ["16px", {"lineHeight": "24px", "fontWeight": "700"}],
+                        "body-mono": ["14px", {"lineHeight": "20px", "fontWeight": "400"}]
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-surface font-body-mono text-on-surface">
+<!-- TopAppBar -->
+<header class="fixed top-0 left-0 w-full z-50 flex justify-between items-center h-12 px-2 max-w-[50ch] mx-auto bg-[#0e1116] border-b border-gray-800">
+<div class="flex items-center gap-2">
+<span class="text-primary-fixed font-bold text-xl font-mono">cco</span>
+</div>
+<nav class="flex gap-4">
+<span class="font-mono uppercase tracking-widest text-xs text-primary-fixed border-b-2 border-primary-fixed cursor-pointer"> [ ● WORK ] </span>
+<span class="font-mono uppercase tracking-widest text-xs text-gray-500 hover:bg-cyan-900/30 hover:text-cyan-200 cursor-pointer"> [ ☠ ERR ] </span>
+<span class="font-mono uppercase tracking-widest text-xs text-gray-500 hover:bg-cyan-900/30 hover:text-cyan-200 cursor-pointer"> [ ◌ WAIT ] </span>
+<span class="font-mono uppercase tracking-widest text-xs text-gray-500 hover:bg-cyan-900/30 hover:text-cyan-200 cursor-pointer"> [ █ IDLE ] </span>
+</nav>
+<div class="flex gap-2 text-primary-fixed">
+<span class="material-symbols-outlined cursor-pointer hover:bg-cyan-900/30">schedule</span>
+<span class="material-symbols-outlined cursor-pointer hover:bg-cyan-900/30">refresh</span>
+</div>
+</header>
+<main class="mt-14 mb-8 max-w-[50ch] mx-auto px-2 space-y-4">
+<!-- Fleet Stats Summary -->
+<section class="border border-outline-variant p-2">
+<div class="flex justify-between text-label-sm font-label-sm mb-1">
+<span>[ FLEET_CAPACITY ]</span>
+<span class="text-primary-fixed">TOTAL: 13</span>
+</div>
+<div class="grid grid-cols-3 gap-2 text-[10px]">
+<div class="bg-surface-container-high p-1">
+<div class="text-emerald-400">● WORKING</div>
+<div class="text-lg">04</div>
+</div>
+<div class="bg-surface-container-high p-1">
+<div class="text-on-surface-variant">◌ IDLE</div>
+<div class="text-lg">03</div>
+</div>
+<div class="bg-surface-container-high p-1">
+<div class="text-primary-fixed">⚙ OTHER</div>
+<div class="text-lg">06</div>
+</div>
+</div>
+<div class="mt-2 text-[10px] flex items-center justify-between">
+<span>SYSTEM HEALTH</span>
+<span class="text-emerald-400">[ GOOD ]</span>
+</div>
+<div class="text-primary-fixed text-[10px] tracking-tighter mt-1 overflow-hidden whitespace-nowrap">
+                ▅▆▇█▆▅▄▃▃▄▅▆▇██▇▆▅▄▃▃▄▅▆▇█▆▅▄▃▃▄▅▆▇█▆▅▄▃▃▄
+            </div>
+</section>
+<!-- Session Monitor Container -->
+<section class="space-y-0 text-label-sm font-label-sm">
+<div class="flex items-center justify-between bg-surface-container-highest px-2 py-1 mb-1">
+<span>╭─ ACTIVE SESSIONS ──────────────────╮</span>
+</div>
+<!-- Table Header -->
+<div class="grid grid-cols-12 gap-1 px-2 text-[10px] border-b border-outline-variant pb-1 uppercase text-on-surface-variant">
+<div class="col-span-5">Identity</div>
+<div class="col-span-3">Status</div>
+<div class="col-span-4 text-right">Activity</div>
+</div>
+<!-- Session Rows (Iterative pattern) -->
+<div class="divide-y divide-outline-variant/30">
+<!-- Session 01: Working -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-worker-001</div>
+<div class="col-span-3 text-emerald-400">▶ WORKING</div>
+<div class="col-span-4 text-right text-primary-fixed">[███████░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 4021 | CPU: 12.4% | MEM: 248MB</div>
+</div>
+</div>
+<!-- Session 02: Working -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-worker-002</div>
+<div class="col-span-3 text-emerald-400">▶ WORKING</div>
+<div class="col-span-4 text-right text-primary-fixed">[████████]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 4022 | CPU: 44.1% | MEM: 512MB</div>
+</div>
+</div>
+<!-- Session 03: Idle -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-worker-003</div>
+<div class="col-span-3 text-gray-500">◌ IDLE</div>
+<div class="col-span-4 text-right text-gray-700">[░░░░░░░░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 4023 | SLEEP_MODE | UPTIME: 42h</div>
+</div>
+</div>
+<!-- Session 04: Working -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-node-primary</div>
+<div class="col-span-3 text-emerald-400">▶ WORKING</div>
+<div class="col-span-4 text-right text-primary-fixed">[████░░░░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 1001 | MASTER_CTRL | L: 0.01</div>
+</div>
+</div>
+<!-- Session 05: Idle -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-node-backup</div>
+<div class="col-span-3 text-gray-500">◌ IDLE</div>
+<div class="col-span-4 text-right text-gray-700">[░░░░░░░░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 1002 | HOT_STANDBY | SYNC_OK</div>
+</div>
+</div>
+<!-- Session 06: Working -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-db-query-1</div>
+<div class="col-span-3 text-emerald-400">▶ WORKING</div>
+<div class="col-span-4 text-right text-primary-fixed">[██████░░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 5091 | SQL_EXEC | IO: 88kb/s</div>
+</div>
+</div>
+<!-- Session 07: Idle -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-log-stream</div>
+<div class="col-span-3 text-gray-500">◌ IDLE</div>
+<div class="col-span-4 text-right text-gray-700">[░░░░░░░░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 2044 | WAIT_FOR_EVT | BUF: 0%</div>
+</div>
+</div>
+<!-- Session 08: Working -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-api-gateway</div>
+<div class="col-span-3 text-emerald-400">▶ WORKING</div>
+<div class="col-span-4 text-right text-primary-fixed">[██░░░░░░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 3001 | REQ_AUTH | 200 OK</div>
+</div>
+</div>
+<!-- Session 09: Mixed -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-cache-mgr</div>
+<div class="col-span-3 text-emerald-400">▶ WORKING</div>
+<div class="col-span-4 text-right text-primary-fixed">[████████]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 6001 | HIT_RATE: 98.2% | TTL</div>
+</div>
+</div>
+<!-- Session 10: Mixed -->
+<div class="py-1">
+<div class="grid grid-cols-12 gap-1 px-2">
+<div class="col-span-5 text-on-surface truncate">cco-auth-srv</div>
+<div class="col-span-3 text-emerald-400">▶ WORKING</div>
+<div class="col-span-4 text-right text-primary-fixed">[██░░░░░░]</div>
+</div>
+<div class="grid grid-cols-12 gap-1 px-2 text-[9px] text-on-surface-variant italic">
+<div class="col-span-12">└ PID: 7002 | JWT_SIGN | SEC_LEVEL: HI</div>
+</div>
+</div>
+</div>
+<div class="px-2 py-1 text-gray-600 text-[10px]">
+                ╰─ [+3 MORE SESSIONS BACKGROUNDED] ──╯
+            </div>
+</section>
+<!-- System Log Sparkline Section -->
+<section class="border-t border-gray-800 pt-2">
+<div class="text-[10px] text-on-surface-variant mb-1 flex items-center justify-between">
+<span>[ LOG_STREAM ]</span>
+<span class="text-primary-fixed">STABLE</span>
+</div>
+<div class="h-8 bg-surface-container-low flex items-end gap-[1px] p-1">
+<div class="bg-primary-fixed w-full h-[60%]"></div>
+<div class="bg-primary-fixed w-full h-[80%]"></div>
+<div class="bg-primary-fixed w-full h-[70%]"></div>
+<div class="bg-primary-fixed w-full h-[90%]"></div>
+<div class="bg-primary-fixed w-full h-[85%]"></div>
+<div class="bg-primary-fixed w-full h-[100%]"></div>
+<div class="bg-primary-fixed w-full h-[95%]"></div>
+<div class="bg-primary-fixed w-full h-[60%]"></div>
+<div class="bg-primary-fixed w-full h-[50%]"></div>
+<div class="bg-primary-fixed w-full h-[70%]"></div>
+<div class="bg-primary-fixed w-full h-[80%]"></div>
+<div class="bg-primary-fixed w-full h-[75%]"></div>
+<div class="bg-primary-fixed w-full h-[90%]"></div>
+<div class="bg-primary-fixed w-full h-[85%]"></div>
+<div class="bg-primary-fixed w-full h-[80%]"></div>
+<div class="bg-primary-fixed w-full h-[70%]"></div>
+<div class="bg-primary-fixed w-full h-[60%]"></div>
+<div class="bg-primary-fixed w-full h-[80%]"></div>
+<div class="bg-primary-fixed w-full h-[90%]"></div>
+<div class="bg-primary-fixed w-full h-[100%]"></div>
+</div>
+</section>
+</main>
+<!-- Footer -->
+<footer class="fixed bottom-0 left-0 w-full z-50 flex justify-between items-center h-6 px-2 max-w-[50ch] mx-auto bg-[#0e1116] border-t border-gray-800 font-mono text-[10px] leading-tight">
+<div class="text-primary-fixed">cco-sys-v1.0</div>
+<div class="flex gap-3">
+<span class="text-gray-600 hover:text-cyan-300 cursor-pointer">F1 HELP</span>
+<span class="text-gray-600 hover:text-cyan-300 cursor-pointer">F5 REFRESH</span>
+<span class="bg-cyan-400 text-[#0e1116] px-1 cursor-pointer">F10 QUIT</span>
+<span class="text-gray-600 hover:text-cyan-300 cursor-pointer">K KILL</span>
+</div>
+</footer>
+</body></html>
