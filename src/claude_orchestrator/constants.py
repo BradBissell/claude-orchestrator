@@ -33,3 +33,9 @@ STATUS_DISPLAY: dict[AgentStatus, tuple[str, str, str]] = {
 ATTENTION_STATUSES = frozenset(
     {AgentStatus.WAITING_PERMISSION, AgentStatus.WAITING_ANSWER, AgentStatus.ERROR}
 )
+
+# How long a session can stay in WORKING with no hook activity before the
+# dashboard tags it STALE. Catches sessions where claude_pid is alive but
+# spinning on a model timeout / network hang — the PID liveness check
+# misses these. Render-time only, no on-disk state.
+STALE_HEARTBEAT_SEC = 60

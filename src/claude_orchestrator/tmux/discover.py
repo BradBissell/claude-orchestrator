@@ -40,12 +40,22 @@ def has_tmux() -> bool:
     return shutil.which("tmux") is not None
 
 
-def _list_tmux_panes() -> list[tuple[int, str, str, str]]:
-    """Return [(pane_pid, session, window, pane_id), ...] for every pane
-    on the running tmux server. Empty list on any failure."""
+def _list_tmux_panes() -> list[tuple[int, str, str, str, str]]:
+    """Return [(pane_pid, session, window, pane_id, sid_from_pane_option), ...]
+    for every pane on the running tmux server. The 5th field is the value of
+    the per-pane `@claude_sid` user option (empty string if unset — set by
+    the SessionStart hook).
+
+    Empty list on any failure."""
     try:
         out = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#S\t#W\t#{pane_id}"],
+            [
+                "tmux",
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_pid}\t#S\t#W\t#{pane_id}\t#{@claude_sid}",
+            ],
             capture_output=True,
             text=True,
             timeout=2,
@@ -56,13 +66,20 @@ def _list_tmux_panes() -> list[tuple[int, str, str, str]]:
     if out.returncode != 0:
         return []
 
-    panes: list[tuple[int, str, str, str]] = []
+    panes: list[tuple[int, str, str, str, str]] = []
     for line in out.stdout.splitlines():
-        try:
-            pid_str, sess, win, pane_id = line.split("\t", 3)
-            panes.append((int(pid_str), sess, win, pane_id))
-        except (ValueError, IndexError):
+        # 4 tab-separated fields when @claude_sid is unset (some tmux versions
+        # trim trailing empty fields); 5 when set. Accept both shapes.
+        parts = line.split("\t")
+        if len(parts) < 4:
             continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        sess, win, pane_id = parts[1], parts[2], parts[3]
+        sid_from_pane = parts[4] if len(parts) >= 5 else ""
+        panes.append((pid, sess, win, pane_id, sid_from_pane))
     return panes
 
 
@@ -154,7 +171,11 @@ def discover_panes() -> list[TmuxPaneInfo]:
     if not panes:
         return []
     pane_pids: dict[int, tuple[str, str, str]] = {
-        pid: (sess, win, pane_id) for pid, sess, win, pane_id in panes
+        pid: (sess, win, pane_id) for pid, sess, win, pane_id, _ in panes
+    }
+    # Per-pane @claude_sid set by the hook handler — definitive when present.
+    sid_by_pane: dict[str, str] = {
+        pane_id: sid for _, _, _, pane_id, sid in panes if sid
     }
 
     discovered: list[TmuxPaneInfo] = []
@@ -166,6 +187,10 @@ def discover_panes() -> list[TmuxPaneInfo]:
         if match is None:
             continue
         sess, win, pane = match
+        # Prefer the pane's @claude_sid (set by SessionStart hook) over the
+        # cmdline parse — survives the user's `cmd | claude` wrapper, exec
+        # chains, and other process-tree shenanigans that hide --resume args.
+        session_id = sid_by_pane.get(pane) or _read_session_id_from_cmdline(cpid)
         discovered.append(
             TmuxPaneInfo(
                 tmux_session=sess,
@@ -173,7 +198,7 @@ def discover_panes() -> list[TmuxPaneInfo]:
                 tmux_pane=pane,
                 claude_pid=cpid,
                 cwd=cwd,
-                session_id=_read_session_id_from_cmdline(cpid),
+                session_id=session_id,
             )
         )
     return discovered

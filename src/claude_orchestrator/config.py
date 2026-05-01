@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 
 # Schema version for state files. Bump on any breaking change to the JSON shape.
-SCHEMA_VERSION = 1
+# v2 added `last_summary` (UserPromptSubmit prompt, 70-char truncated). Readers
+# tolerate v1 files in-place — see AgentState.from_dict.
+SCHEMA_VERSION = 2
 
 # Hook handler timing budget — emit a warning above WARN, kill criterion above KILL.
 HOOK_LATENCY_WARN_MS = 15

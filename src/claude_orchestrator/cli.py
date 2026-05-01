@@ -44,6 +44,18 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="One-line summary for scripts")
     subparsers.add_parser("tmux-widget", help="Output for tmux status-right")
 
+    kill_p = subparsers.add_parser(
+        "kill", help="Kill a session (signals claude_pid, kills tmux window, removes state)"
+    )
+    kill_p.add_argument(
+        "sid",
+        help="Session id or unique prefix (8+ chars usually enough)",
+    )
+
+    subparsers.add_parser(
+        "doctor", help="Check that hooks, paths, and dependencies are configured correctly"
+    )
+
     init_p = subparsers.add_parser("init", help="Install hooks into ~/.claude/settings.json")
     init_p.add_argument("--dry-run", action="store_true", help="Print plan without writing")
 
@@ -87,6 +99,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "refresh-tmux":
         return _cmd_refresh_tmux()
+    if args.command == "kill":
+        return _cmd_kill(args.sid)
+    if args.command == "doctor":
+        return _cmd_doctor()
     if args.command == "tui":
         return _cmd_tui()
 
@@ -245,6 +261,160 @@ def _cmd_refresh_tmux() -> int:
         return 0
     updated = enrich_state_files(state_dir())
     print(f"discovered {len(panes)} pane(s); updated {updated} state file(s).")
+    return 0
+
+
+# --- kill -----------------------------------------------------------------
+
+
+def _cmd_kill(sid_or_prefix: str) -> int:
+    """Kill a session by id (or unique prefix). Mirrors the TUI 'x' action."""
+    from claude_orchestrator.config import state_dir
+    from claude_orchestrator.tmux.navigator import kill_session
+
+    manager = StateManager()
+    matches = [a for a in manager.scan() if a.session_id.startswith(sid_or_prefix)]
+
+    if not matches:
+        print(f"cco: no session matches '{sid_or_prefix}'", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        print(
+            f"cco: '{sid_or_prefix}' is ambiguous "
+            f"({len(matches)} matches: "
+            f"{', '.join(a.session_id[:8] for a in matches)}). "
+            "Use a longer prefix.",
+            file=sys.stderr,
+        )
+        return 1
+
+    agent = matches[0]
+    label = agent.project_name or agent.session_id[:8]
+    outcome = kill_session(agent, state_dir())
+    if outcome.ok:
+        suffix = f" ({outcome.detail})" if outcome.detail else ""
+        print(f"killed {label}{suffix}")
+        return 0
+    print(f"cco: kill failed: {outcome.detail}", file=sys.stderr)
+    return 1
+
+
+# --- doctor ---------------------------------------------------------------
+
+
+def _cmd_doctor() -> int:
+    """Diagnose hook installation, paths, and dependencies. Returns 0 if all
+    checks pass, 1 on warnings, 2 on hard failures."""
+    import shutil
+
+    from claude_orchestrator.config import (
+        claude_settings_path,
+        hook_handler_path,
+        pending_dir,
+        state_dir,
+    )
+
+    checks: list[tuple[str, str, str]] = []  # (level, label, detail)
+
+    def ok(label: str, detail: str = "") -> None:
+        checks.append(("ok", label, detail))
+
+    def warn(label: str, detail: str = "") -> None:
+        checks.append(("warn", label, detail))
+
+    def fail(label: str, detail: str = "") -> None:
+        checks.append(("fail", label, detail))
+
+    # 1. Required CLI tools.
+    for tool in ("bash", "jq", "flock"):
+        if shutil.which(tool):
+            ok(f"{tool} on PATH")
+        else:
+            fail(f"{tool} not on PATH", "hook handler will fail-open silently")
+
+    # 2. tmux (warn-only — tmux isn't strictly required, just for jump-to-pane).
+    if shutil.which("tmux"):
+        ok("tmux on PATH")
+    else:
+        warn("tmux not on PATH", "Enter-to-jump will be disabled")
+
+    # 3. State / pending / lock dirs are writable with 0700.
+    sd = state_dir()
+    pd = pending_dir()
+    for d in (sd, pd):
+        if not d.exists():
+            warn(f"{d} not created yet", "will be created on first hook fire")
+            continue
+        try:
+            mode = d.stat().st_mode & 0o777
+        except OSError as exc:
+            fail(f"{d} unreadable", str(exc))
+            continue
+        if mode == 0o700:
+            ok(f"{d} mode 0700")
+        else:
+            warn(f"{d} mode {oct(mode)}", "expected 0700; rerun `cco init`")
+
+    # 4. Hook handler exists at the path config will hand to settings.json.
+    handler = hook_handler_path()
+    if handler.is_file():
+        ok(f"hook handler at {handler}")
+    else:
+        fail(
+            f"hook handler missing at {handler}",
+            "package install is broken; reinstall claude-orchestrator",
+        )
+
+    # 5. Hooks installed in claude settings.json.
+    settings = claude_settings_path()
+    handler_str = str(handler)
+    if settings.is_file():
+        try:
+            import json
+
+            data = json.loads(settings.read_text())
+            hooks = data.get("hooks", {})
+            if not isinstance(hooks, dict):
+                fail("settings.json hooks malformed", "rerun `cco init`")
+            else:
+                installed_events = [
+                    ev
+                    for ev, defs in hooks.items()
+                    if isinstance(defs, list)
+                    and any(handler_str in json.dumps(d) for d in defs)
+                ]
+                if installed_events:
+                    ok(
+                        "cco hooks installed",
+                        f"{len(installed_events)} event(s): {', '.join(installed_events[:3])}"
+                        + ("…" if len(installed_events) > 3 else ""),
+                    )
+                else:
+                    fail(
+                        "cco hooks NOT installed in settings.json",
+                        "run `cco init`",
+                    )
+        except (OSError, ValueError) as exc:
+            fail(f"can't read {settings}", str(exc))
+    else:
+        warn(f"{settings} does not exist", "Claude Code may not be configured yet")
+
+    # Render results.
+    icons = {"ok": "[ ok ]", "warn": "[warn]", "fail": "[FAIL]"}
+    fails = sum(1 for level, _, _ in checks if level == "fail")
+    warns = sum(1 for level, _, _ in checks if level == "warn")
+    for level, label, detail in checks:
+        line = f"{icons[level]} {label}"
+        if detail:
+            line += f"  — {detail}"
+        print(line)
+    print()
+    print(f"summary: {fails} fail / {warns} warn / {len(checks) - fails - warns} ok")
+
+    if fails:
+        return 2
+    if warns:
+        return 1
     return 0
 
 

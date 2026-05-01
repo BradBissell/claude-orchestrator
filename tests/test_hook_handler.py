@@ -16,7 +16,7 @@ import pytest
 from claude_orchestrator.config import hook_handler_path
 
 HANDLER = hook_handler_path()
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @pytest.fixture
@@ -257,6 +257,75 @@ def test_state_file_permissions_are_0600(state_env: dict[str, str]) -> None:
     assert mode == 0o600, f"expected 0600, got {oct(mode)}"
 
 
+def test_cco_internal_env_skips_state_write(state_env: dict[str, str]) -> None:
+    """When the summarizer subprocess fires `claude -p`, our hook handler
+    sees CCO_INTERNAL=1 in the inherited env and exits without writing a
+    state file. Without this guard, every summarization would create a
+    ghost session in the dashboard."""
+    sid = "test-session-internal"
+    result = _fire_hook(
+        {
+            "session_id": sid,
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/myproject",
+        },
+        {**state_env, "CCO_INTERNAL": "1"},
+    )
+    assert result.returncode == 0
+    # No state file written.
+    assert not _state_file(state_env, sid).exists()
+
+
+def test_user_prompt_submit_records_last_summary(state_env: dict[str, str]) -> None:
+    sid = "test-session-prompt"
+    result = _fire_hook(
+        {
+            "session_id": sid,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/tmp/myproject",
+            "prompt": "fix the failing test in tests/test_foo.py",
+        },
+        state_env,
+    )
+    assert result.returncode == 0, result.stderr
+    state = _read_state(state_env, sid)
+    assert state["last_summary"] == "fix the failing test in tests/test_foo.py"
+
+
+def test_user_prompt_submit_truncates_to_70_chars(state_env: dict[str, str]) -> None:
+    sid = "test-session-prompt-long"
+    long_prompt = "x" * 200
+    _fire_hook(
+        {
+            "session_id": sid,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/tmp/myproject",
+            "prompt": long_prompt,
+        },
+        state_env,
+    )
+    state = _read_state(state_env, sid)
+    assert isinstance(state["last_summary"], str)
+    assert len(state["last_summary"]) == 70
+
+
+def test_user_prompt_submit_strips_newlines(state_env: dict[str, str]) -> None:
+    """Newlines/tabs become spaces so the JSON state file stays single-line-safe."""
+    sid = "test-session-prompt-multi"
+    _fire_hook(
+        {
+            "session_id": sid,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/tmp/myproject",
+            "prompt": "first line\nsecond\tline",
+        },
+        state_env,
+    )
+    state = _read_state(state_env, sid)
+    assert "\n" not in state["last_summary"]  # type: ignore[operator]
+    assert "\t" not in state["last_summary"]  # type: ignore[operator]
+
+
 def test_concurrent_writes_dont_lose_updates(state_env: dict[str, str]) -> None:
     """Fire 10 hooks concurrently for the same session; tool_count must equal 10."""
     sid = "test-session-9"
@@ -292,3 +361,73 @@ def test_concurrent_writes_dont_lose_updates(state_env: dict[str, str]) -> None:
         f"flock should have serialised all 10 writes; got {state['tool_count']}"
     )
     assert state["last_event_seq"] == 10
+
+
+def _run_populate_tmux_mapping(
+    stdin_json: str,
+    *,
+    tmux_body: str | None = None,
+    tmux_set: bool = True,
+) -> str:
+    """Source event_handler.sh's `populate_tmux_mapping` in a subshell with a
+    controlled `tmux` shim and run it against stdin_json. Lets us exercise
+    the function in isolation without fighting the handler's PATH reset.
+    """
+    handler_text = HANDLER.read_text()
+    start = handler_text.index("populate_tmux_mapping() {")
+    end = handler_text.index("\n}\n", start) + 3
+    fn_body = handler_text[start:end]
+
+    body = tmux_body if tmux_body is not None else 'echo ""; return 1'
+    tmux_var = "fake-server" if tmux_set else ""
+    script = (
+        "#!/usr/bin/env bash\nset -u\n"
+        f'TMUX="{tmux_var}"\n'
+        f"tmux() {{ {body}; }}\nexport -f tmux\n\n"
+        f"{fn_body}\n\n"
+        "populate_tmux_mapping\n"
+    )
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        input=stdin_json,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_populate_tmux_mapping_enriches_stdin_with_tmux_fields() -> None:
+    out = _run_populate_tmux_mapping(
+        '{"session_id":"x","status":"IDLE"}',
+        tmux_body=r'printf "work\tclaude\t%%9"',
+    )
+    parsed = json.loads(out)
+    assert parsed["tmux_session"] == "work"
+    assert parsed["tmux_window"] == "claude"
+    assert parsed["tmux_pane"] == "%9"
+    assert parsed["session_id"] == "x"
+
+
+def test_populate_tmux_mapping_passes_stdin_through_when_tmux_unset() -> None:
+    """No TMUX env → no enrichment, but the JSON must survive intact."""
+    body = '{"session_id":"x","status":"IDLE"}'
+    out = _run_populate_tmux_mapping(body, tmux_set=False)
+    assert json.loads(out) == json.loads(body)
+
+
+def test_populate_tmux_mapping_passes_stdin_through_on_tmux_failure() -> None:
+    """Regression: a non-zero `tmux display-message` (server hiccup) used to
+    cause populate_tmux_mapping to silently drop stdin, producing an empty
+    state file. It must always pass stdin through."""
+    body = '{"session_id":"x","status":"WORKING"}'
+    out = _run_populate_tmux_mapping(body, tmux_body="return 1")
+    assert json.loads(out) == json.loads(body)
+
+
+def test_populate_tmux_mapping_passes_stdin_through_on_empty_tmux_output() -> None:
+    body = '{"session_id":"x","status":"WORKING"}'
+    out = _run_populate_tmux_mapping(body, tmux_body='echo ""')
+    assert json.loads(out) == json.loads(body)

@@ -531,3 +531,62 @@ def test_read_session_id_rejects_garbage(tmp_path: Path, monkeypatch: pytest.Mon
     finally:
         builtins.open = real_open  # type: ignore[assignment]
     assert got is None
+
+
+def test_discover_uses_pane_claude_sid_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the per-pane @claude_sid user option is set (by the SessionStart
+    hook), discover_panes uses it instead of parsing the claude --resume
+    argv. This is what disambiguates same-cwd panes."""
+    monkeypatch.setattr(discover, "has_tmux", lambda: True)
+    # 5-tab-separated: pid, session, window, pane_id, @claude_sid
+    panes = "1234\twork\tclaude\t%1\tabc-pane-sid\n"
+    pgrep = "5678\n"
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(panes, pgrep))
+    monkeypatch.setattr(discover, "_read_proc_cwd", lambda pid: "/tmp/projX")
+    monkeypatch.setattr(
+        discover, "_read_proc_ppid", lambda pid: 1234 if pid == 5678 else None
+    )
+
+    # If discover read cmdline, it'd return this — but pane option must win.
+    monkeypatch.setattr(
+        discover, "_read_session_id_from_cmdline", lambda pid: "wrong-cmdline-sid"
+    )
+
+    found = discover.discover_panes()
+    assert len(found) == 1
+    assert found[0].session_id == "abc-pane-sid"
+
+
+def test_discover_falls_back_to_cmdline_when_pane_option_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When @claude_sid isn't set on the pane (older claude that hasn't
+    fired SessionStart yet, or pre-fix state), fall back to argv parsing."""
+    monkeypatch.setattr(discover, "has_tmux", lambda: True)
+    # Trailing tab-then-empty mimics tmux 5-field format with empty option.
+    panes = "1234\twork\tclaude\t%1\t\n"
+    pgrep = "5678\n"
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(panes, pgrep))
+    monkeypatch.setattr(discover, "_read_proc_cwd", lambda pid: "/tmp/projX")
+    monkeypatch.setattr(
+        discover, "_read_proc_ppid", lambda pid: 1234 if pid == 5678 else None
+    )
+    monkeypatch.setattr(
+        discover, "_read_session_id_from_cmdline", lambda pid: "fallback-sid"
+    )
+
+    found = discover.discover_panes()
+    assert len(found) == 1
+    assert found[0].session_id == "fallback-sid"
+
+
+def test_list_tmux_panes_handles_legacy_4_field_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older tmux versions trim trailing empty fields (no `@claude_sid`).
+    Must still parse without crashing."""
+    monkeypatch.setattr(discover, "has_tmux", lambda: True)
+    panes = "1234\twork\tclaude\t%1\n"
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(panes, ""))
+    parsed = discover._list_tmux_panes()
+    assert parsed == [(1234, "work", "claude", "%1", "")]
