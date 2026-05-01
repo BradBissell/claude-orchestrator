@@ -33,6 +33,11 @@ cco_exit_open() {
 }
 trap cco_exit_open ERR EXIT
 
+# Skip cco's own internal `claude` invocations (e.g. the TUI summarizer
+# shells out to `claude -p` to compute one-line summaries — those calls
+# would otherwise pollute the dashboard with ghost sessions).
+[ -n "${CCO_INTERNAL:-}" ] && cco_exit_open
+
 # Defeat hook-environment hijack vectors.
 unset BASH_ENV ENV PROMPT_COMMAND
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -42,7 +47,7 @@ export PATH
 STATE_DIR="${CCO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-orchestrator/sessions}"
 PENDING_DIR="${CCO_PENDING_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-orchestrator/pending}"
 LOCK_DIR="${CCO_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}/claude-orchestrator/locks}"
-SCHEMA_VERSION=1
+SCHEMA_VERSION=2
 
 mkdir -p "$STATE_DIR" "$PENDING_DIR" "$LOCK_DIR" 2>/dev/null || cco_exit_open
 chmod 0700 "$STATE_DIR" "$PENDING_DIR" "$LOCK_DIR" 2>/dev/null || true
@@ -113,10 +118,15 @@ read_field() {
 
 write_state() {
   # Receives the desired JSON document on stdin and writes it atomically.
+  # Pipes through populate_tmux_mapping first so EVERY event refreshes the
+  # tmux session/window/pane fields — without this, a stale pane_id can
+  # outlive the pane it pointed to (claude --resume reused the session_id
+  # in a different pane), and the dashboard's Enter-to-jump lands the user
+  # in the wrong window.
   local tmp
   tmp="$(mktemp "$STATE_DIR/.tmp.XXXXXX")" || return
   trap 'rm -f "$tmp"' RETURN
-  cat >"$tmp" || return
+  populate_tmux_mapping >"$tmp" || return
   # fsync the temp file's contents before rename — survives crashes.
   if command -v sync >/dev/null 2>&1; then
     sync -f "$tmp" 2>/dev/null || sync "$tmp" 2>/dev/null || true
@@ -171,7 +181,8 @@ base_state() {
          tmux_window: null,
          tmux_pane: null,
          claude_pid: (if $cpid == "" then null else ($cpid | tonumber) end),
-         notification: null
+         notification: null,
+         last_summary: ""
        }'
   fi
 }
@@ -192,27 +203,40 @@ apply_status() {
 
 # --- tmux mapping (best-effort, non-blocking) -----------------------------
 populate_tmux_mapping() {
-  # If we're inside a tmux pane, capture session/window/pane refs.
-  # Re-read every event because tmux assignments can change.
-  if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-    local info
-    info="$(tmux display-message -p $'#S\t#W\t#{pane_id}' 2>/dev/null)" || return 0
-    if [ -n "$info" ]; then
-      local s w p
-      IFS=$'\t' read -r s w p <<<"$info"
-      jq -c \
-        --arg s "$s" --arg w "$w" --arg p "$p" \
-        '. + {tmux_session: $s, tmux_window: $w, tmux_pane: $p}'
-      return 0
-    fi
+  # Pass stdin through, optionally enriched with tmux session/window/pane
+  # IDs when we're inside a tmux pane. ALWAYS produces stdout — never
+  # silently drops the input, even when tmux is unreachable. Re-runs every
+  # event so a stale pane_id can't outlive the pane it pointed to.
+  if [ -z "${TMUX:-}" ] || ! command -v tmux >/dev/null 2>&1; then
+    cat
+    return 0
   fi
-  cat
+  local info
+  info="$(tmux display-message -p $'#S\t#W\t#{pane_id}' 2>/dev/null)"
+  if [ -z "$info" ]; then
+    cat
+    return 0
+  fi
+  local s w p
+  IFS=$'\t' read -r s w p <<<"$info"
+  # Tag the pane with our session_id as a tmux per-pane user option. Lets
+  # discover_panes match a pane → sid directly without walking process
+  # trees or parsing /proc/cmdline. Idempotent; runs every event so a
+  # pane that loses its tag (e.g. tmux server restart) self-heals.
+  # Skip when SESSION_ID isn't bound (function called from a unit test
+  # harness without the script's top-level vars).
+  if [ -n "${SESSION_ID:-}" ]; then
+    tmux set-option -p -t "$p" "@claude_sid" "$SESSION_ID" >/dev/null 2>&1 || true
+  fi
+  jq -c \
+    --arg s "$s" --arg w "$w" --arg p "$p" \
+    '. + {tmux_session: $s, tmux_window: $w, tmux_pane: $p}'
 }
 
 # --- event branches -------------------------------------------------------
 case "$EVENT_NAME" in
   SessionStart)
-    base_state | jq -c '. + {status: "IDLE"}' | populate_tmux_mapping | write_state
+    base_state | jq -c '. + {status: "IDLE"}' | write_state
     ;;
 
   SessionEnd | Stop | StopFailure)
@@ -222,7 +246,6 @@ case "$EVENT_NAME" in
   PreToolUse)
     base_state \
       | jq -c '. + {status: "WORKING", tool_count: (.tool_count + 1), notification: null}' \
-      | populate_tmux_mapping \
       | write_state
     ;;
 
@@ -290,7 +313,17 @@ case "$EVENT_NAME" in
       | write_state
     ;;
 
-  UserPromptSubmit | SubagentStart | SubagentStop)
+  UserPromptSubmit)
+    # Capture the latest user prompt as a 70-char "what is this session doing"
+    # subline for the dashboard. tr/sed scrub newlines so the JSON stays one-line.
+    PROMPT_RAW="$(printf '%s' "$INPUT_JSON" | jq -r '.prompt // ""')"
+    PROMPT_TRIM="$(printf '%s' "$PROMPT_RAW" | tr '\n\r\t' '   ' | head -c 70)"
+    base_state \
+      | jq -c --arg s "$PROMPT_TRIM" '. + {last_summary: $s}' \
+      | write_state
+    ;;
+
+  SubagentStart | SubagentStop)
     base_state | write_state
     ;;
 

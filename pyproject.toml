@@ -82,6 +82,7 @@ ignore = [
 "tests/**" = ["S101", "S108", "S603", "S607"]
 "src/claude_orchestrator/tmux/navigator.py" = ["S603", "S607"]
 "src/claude_orchestrator/tmux/discover.py" = ["S603", "S607"]
+"src/claude_orchestrator/summarizer.py" = ["S603"]
 "src/claude_orchestrator/hooks/installer.py" = ["S603"]
 
 [tool.mypy]

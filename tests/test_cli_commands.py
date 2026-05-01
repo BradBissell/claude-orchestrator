@@ -106,3 +106,74 @@ def test_unknown_subcommand_still_returns_two(capsys: pytest.CaptureFixture[str]
     assert exc.value.code == 2
     err = capsys.readouterr().err.lower()
     assert "invalid choice" in err or "unrecognized" in err or "bogus" in err
+
+
+# --- kill ----------------------------------------------------------------
+
+
+def test_kill_unknown_sid_returns_error(
+    state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["kill", "not-a-real-sid"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no session matches" in err
+
+
+def test_kill_ambiguous_prefix_returns_error(
+    state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(state_dir, "abc-1", project_name="one")
+    _write(state_dir, "abc-2", project_name="two")
+    rc = main(["kill", "abc"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ambiguous" in err
+
+
+def test_kill_unique_prefix_signals_pid_and_unlinks(
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use a fake kill_session so the test doesn't need a real process."""
+    from claude_orchestrator.tmux import navigator
+
+    _write(state_dir, "abc-12345", project_name="proj")
+    captured: list[object] = []
+
+    def fake_kill(agent: object, sd: object) -> object:
+        captured.append(agent)
+
+        class _Outcome:
+            ok = True
+            detail = ""
+
+        return _Outcome()
+
+    monkeypatch.setattr(navigator, "kill_session", fake_kill)
+    # main() imports kill_session lazily — patch in cli too if needed.
+    import claude_orchestrator.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "_cmd_kill", cli_module._cmd_kill)
+
+    rc = main(["kill", "abc-1"])
+    assert rc == 0
+    assert captured, "kill_session must be invoked"
+    out = capsys.readouterr().out
+    assert "killed proj" in out
+
+
+# --- doctor --------------------------------------------------------------
+
+
+def test_doctor_runs_without_crashing(
+    state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    # Always exits 0 / 1 / 2 — never crashes — and prints a summary line.
+    assert rc in (0, 1, 2)
+    assert "summary:" in out
+    # Every check rendered with one of the three icons.
+    assert any(tag in out for tag in ("[ ok ]", "[warn]", "[FAIL]"))

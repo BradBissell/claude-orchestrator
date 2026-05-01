@@ -43,6 +43,7 @@ class AgentState:
     tmux_pane: str | None = None
     claude_pid: int | None = None  # walked up from hook's PPID; canonical for tmux mapping
     notification: Notification | None = None
+    last_summary: str = ""  # v2: latest user prompt, truncated to 70 chars
     schema_version: int = SCHEMA_VERSION
 
     def to_json(self) -> str:
@@ -60,8 +61,7 @@ class AgentState:
         version = data.get("schema_version")
         if version is None:
             raise ValueError("state file missing schema_version — refusing to read pre-v1 file")
-        if version != SCHEMA_VERSION:
-            # v1 is the only version today; future migrations branch here.
+        if version not in (1, SCHEMA_VERSION):
             raise ValueError(f"unsupported schema_version={version} (expected {SCHEMA_VERSION})")
 
         notif_raw = data.get("notification")
@@ -72,6 +72,7 @@ class AgentState:
         except ValueError:
             status = AgentStatus.IDLE
 
+        # v1→v2 migration: last_summary is new in v2; default empty for older files.
         return cls(
             session_id=data["session_id"],
             cwd=data["cwd"],
@@ -88,6 +89,7 @@ class AgentState:
             tmux_pane=data.get("tmux_pane"),
             claude_pid=data.get("claude_pid"),
             notification=notif,
+            last_summary=data.get("last_summary", ""),
             schema_version=version,
         )
 

@@ -4,6 +4,7 @@ so we don't depend on a real tmux server during unit tests."""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from claude_orchestrator.constants import AgentStatus
 from claude_orchestrator.state.models import AgentState
 from claude_orchestrator.tmux import navigator
-from claude_orchestrator.tmux.navigator import JumpResult, jump_to
+from claude_orchestrator.tmux.navigator import JumpResult, jump_to, kill_session
 
 
 def _agent(**overrides: Any) -> AgentState:
@@ -76,8 +77,10 @@ def test_jump_ok_with_session_window_and_pane(
 
     assert outcome.ok
     # has-session, select-window, select-pane in that order.
+    # select-window targets the pane_id (not session:windowname) to avoid
+    # ambiguity when multiple windows share the same auto-renamed name.
     assert any("has-session" in c for c in calls)
-    assert any("select-window" in c and "work:claude" in c for c in calls)
+    assert any("select-window" in c and "%1" in c for c in calls)
     assert any("select-pane" in c and "%1" in c for c in calls)
 
 
@@ -97,6 +100,35 @@ def test_jump_ok_when_pane_missing_still_selects_window(
     assert not any("select-pane" in c for c in calls)
 
 
+def test_jump_uses_pane_id_avoiding_duplicate_window_name_failure(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: when several windows in a session share the same auto-renamed
+    name (e.g. all 'claude'), `select-window -t sess:claude` fails ambiguously
+    with 'can't find window: claude'. Targeting the pane_id sidesteps the
+    name collision since pane_ids are unique server-wide."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        # Simulate the real-world failure: name-based targeting fails, pane-id
+        # targeting succeeds.
+        if "select-window" in args and any(a == "work:claude" for a in args):
+            return subprocess.CompletedProcess(
+                args, 1, "", "can't find window: claude"
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    outcome = jump_to(_agent(tmux_session="work", tmux_window="claude", tmux_pane="%24"))
+
+    assert outcome.ok, outcome.detail
+    # Must NOT have used the ambiguous name-based target.
+    assert not any("select-window" in c and "work:claude" in c for c in calls)
+    # Must have used the unambiguous pane-id target.
+    assert any("select-window" in c and "%24" in c for c in calls)
+
+
 def test_jump_failed_when_select_window_errors(
     fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -111,3 +143,168 @@ def test_jump_failed_when_select_window_errors(
     outcome = jump_to(_agent())
     assert outcome.result is JumpResult.FAILED
     assert "boom" in outcome.detail
+
+
+def test_jump_fails_when_pane_no_longer_hosts_claude_pid(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: pane_id is valid (select-window would succeed) but the
+    pane was reused by a different claude. Without validation, the user
+    silently lands in the wrong window. With validation, jump_to fails
+    with 'can't find pane' so the caller can rediscover."""
+    monkeypatch.setattr(navigator, "_pane_hosts_pid", lambda *_: False)
+
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if "has-session" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        # select-window must NOT be reached when validation fails.
+        if "select-window" in args:
+            raise AssertionError(
+                "select-window was called even though pane validation failed"
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    outcome = jump_to(_agent(claude_pid=4242, tmux_pane="%9"))
+
+    assert outcome.result is JumpResult.FAILED
+    # Marker that triggers the rediscover path in _is_stale_tmux_ref.
+    assert "can't find pane" in outcome.detail.lower()
+
+
+def test_jump_proceeds_when_pane_hosts_claude_pid(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validation passes — select-window runs as before."""
+    monkeypatch.setattr(navigator, "_pane_hosts_pid", lambda *_: True)
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    outcome = jump_to(_agent(claude_pid=4242, tmux_pane="%9"))
+
+    assert outcome.ok
+    assert any("select-window" in c and "%9" in c for c in calls)
+
+
+def test_jump_skips_pane_validation_when_claude_pid_unknown(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When state never recorded a claude_pid, fall back to trusting the
+    recorded pane_id (preserves prior behavior for pre-pid state files)."""
+
+    def boom(*_: object) -> bool:
+        raise AssertionError("validation should be skipped without claude_pid")
+
+    monkeypatch.setattr(navigator, "_pane_hosts_pid", boom)
+
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    outcome = jump_to(_agent(claude_pid=None, tmux_pane="%9"))
+    assert outcome.ok
+
+
+def test_pid_descends_from_walks_ppid_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_pid_descends_from` walks PPID up to the depth cap, not forever."""
+    chain = {100: 50, 50: 10, 10: 1}
+    monkeypatch.setattr(navigator, "_read_ppid", lambda pid: chain.get(pid))
+    assert navigator._pid_descends_from(100, 10)
+    assert navigator._pid_descends_from(100, 50)
+    assert navigator._pid_descends_from(100, 100)  # self-match
+    assert not navigator._pid_descends_from(100, 999)
+    assert not navigator._pid_descends_from(100, 1)  # walks stop at PID <= 1
+
+
+# ---- kill_session ---------------------------------------------------------
+
+
+def _write_state_file(directory: Path, sid: str) -> Path:
+    p = directory / f"{sid}.json"
+    p.write_text("{}")
+    return p
+
+
+def test_kill_session_signals_pid_kills_window_unlinks_state(
+    fake_tmux_present: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_file = _write_state_file(tmp_path, "s1")
+
+    signaled: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "claude_orchestrator.tmux.navigator.os.kill",
+        lambda pid, sig: signaled.append((pid, sig)),
+    )
+
+    tmux_calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        tmux_calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    agent = _agent(claude_pid=4242)
+    outcome = kill_session(agent, tmp_path)
+
+    assert outcome.ok
+    assert signaled == [(4242, 15)]  # SIGTERM
+    assert any("kill-window" in c for c in tmux_calls)
+    # kill-window targets pane_id, not session:windowname.
+    assert any("kill-window" in c and "%1" in c for c in tmux_calls)
+    assert not any("work:claude" in c for c in tmux_calls)
+    assert not state_file.exists()
+
+
+def test_kill_session_tolerates_already_dead_pid(
+    fake_tmux_present: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_state_file(tmp_path, "s1")
+
+    def raise_lookup(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr("claude_orchestrator.tmux.navigator.os.kill", raise_lookup)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a, 0, "", ""),
+    )
+
+    outcome = kill_session(_agent(claude_pid=4242), tmp_path)
+    assert outcome.ok
+
+
+def test_kill_session_treats_missing_tmux_window_as_success(
+    fake_tmux_present: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_state_file(tmp_path, "s1")
+    monkeypatch.setattr("claude_orchestrator.tmux.navigator.os.kill", lambda *a: None)
+
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 1, "", "can't find window: work:claude")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    outcome = kill_session(_agent(claude_pid=4242), tmp_path)
+    assert outcome.ok
+
+
+def test_kill_session_no_pid_no_tmux_just_unlinks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sessions without a known pid or tmux info still get the state file removed."""
+    state_file = _write_state_file(tmp_path, "s1")
+    monkeypatch.setattr(navigator, "has_tmux", lambda: False)
+    agent = _agent(claude_pid=None, tmux_session=None, tmux_window=None, tmux_pane=None)
+    outcome = kill_session(agent, tmp_path)
+    assert outcome.ok
+    assert not state_file.exists()

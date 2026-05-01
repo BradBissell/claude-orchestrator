@@ -1,0 +1,106 @@
+/* Stitch palette. See docs/stitch-handoff.md for source of truth. */
+
+$surface: #0d1515;
+$surface-alt: #192121;
+$surface-high: #232c2b;
+$ink: #dbe4e3;
+$ink-dim: #b9cac9;
+$outline: #839493;
+$primary: #00ffff;
+
+$work: #3fb950;
+$idle: #3b4048;
+$perm: #f85149;
+$wait: #d29922;
+$err: #d2a8ff;
+$dead: #3b4048;
+
+Screen {
+    background: $surface;
+    color: $ink;
+}
+
+Header {
+    background: $surface;
+    color: $primary;
+    text-style: bold;
+}
+
+Footer {
+    background: $surface;
+    color: $ink-dim;
+}
+
+#main {
+    height: 1fr;
+    background: $surface;
+    padding: 0 1;
+}
+
+/* HeaderBar: top counter strip */
+
+HeaderBar {
+    height: 3;
+    background: $surface-alt;
+    border: tall $outline;
+    padding: 0 1;
+    color: $ink;
+}
+
+HeaderBar > .badge {
+    padding: 0 1;
+}
+
+/* SessionList wraps each row in a ListItem; we own the row visuals. */
+
+#session-list {
+    height: 1fr;
+    background: $surface;
+    border: tall $outline;
+}
+
+#session-list > ListItem {
+    background: $surface;
+    padding: 0;
+    height: auto;
+    border-left: blank;
+}
+
+/* Cursor row — strong cyan-tinted bg + thick primary left bar.
+ * Note: Textual's ListItem highlight class is `-highlight` (one hyphen),
+ * NOT `--highlight`. Both focused- and unfocused-listview rules below so
+ * the cursor remains visible whether or not the ListView holds focus.
+ *
+ * The #id selector wins specificity vs Textual's default `&:focus & >`
+ * rule, so these override correctly.
+ */
+#session-list > ListItem.-highlight,
+#session-list:focus > ListItem.-highlight {
+    background: #0e6868;
+    color: $ink;
+    text-style: bold;
+    border-left: thick $primary;
+}
+
+/* SessionRow: 2-row card. The inner Static carries rich markup colors. */
+
+SessionRow {
+    height: 2;
+    padding: 0 1;
+    background: transparent;
+    color: $ink;
+}
+
+#summary-line {
+    height: 1;
+    background: $surface-alt;
+    color: $ink-dim;
+    padding: 0 1;
+}
+
+StatusToast {
+    height: 1;
+    background: $surface;
+    color: $ink-dim;
+    padding: 0 1;
+}

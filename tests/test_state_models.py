@@ -27,7 +27,7 @@ def test_to_json_roundtrip() -> None:
     data = json.loads(raw)
     assert data["session_id"] == "abc-123"
     assert data["status"] == "WORKING"
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["tool_count"] == 3
 
 
@@ -115,3 +115,31 @@ def test_status_line_with_attention() -> None:
 
 def test_status_line_empty() -> None:
     assert StatusSummary.from_agents([]).status_line() == "—"
+
+
+def test_v1_state_migrates_to_v2_with_empty_last_summary() -> None:
+    """A v1 state file (no last_summary) reads cleanly with default empty string."""
+    s = AgentState.from_dict(
+        {
+            "schema_version": 1,
+            "session_id": "abc",
+            "cwd": "/tmp",
+            "started_at": "2026-04-29T10:00:00Z",
+            "status": "WORKING",
+        }
+    )
+    assert s.last_summary == ""
+    assert s.schema_version == 1  # preserved as-read; next write upgrades to 2
+
+
+def test_v2_state_preserves_last_summary() -> None:
+    s = AgentState.from_dict(
+        {
+            "schema_version": 2,
+            "session_id": "abc",
+            "cwd": "/tmp",
+            "started_at": "2026-04-29T10:00:00Z",
+            "last_summary": "fix the failing test",
+        }
+    )
+    assert s.last_summary == "fix the failing test"
