@@ -9,3 +9,7 @@ build/
 .mypy_cache/
 .ruff_cache/
 /tmp_state/
+
+# Internal-only design notes and handoff docs.
+# Tracked locally; never published.
+/docs/internal/
