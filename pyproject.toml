@@ -3,8 +3,13 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-orchestrator"
-version = "0.0.0"
+# Distribution name on PyPI. The import package stays `claude_orchestrator`
+# (see [tool.hatch.build.targets.wheel] below) so existing imports keep
+# working; we picked `cco` as the distribution name because (a) the
+# `claude-orchestrator` name was already taken on PyPI by an unrelated
+# project, and (b) `cco` matches the binary that `pip install` exposes.
+name = "cco"
+version = "0.1.0"
 description = "Linux-native dashboard + lifecycle orchestrator for Claude Code sessions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +17,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Brad Bissell" }]
 keywords = ["claude-code", "tmux", "dashboard", "linux", "orchestrator"]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -45,8 +50,9 @@ dev = [
 cco = "claude_orchestrator.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/bbissell/claude-orchestrator"
-Issues = "https://github.com/bbissell/claude-orchestrator/issues"
+Homepage = "https://github.com/BradBissell/claude-orchestrator"
+Issues = "https://github.com/BradBissell/claude-orchestrator/issues"
+Source = "https://github.com/BradBissell/claude-orchestrator"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_orchestrator"]

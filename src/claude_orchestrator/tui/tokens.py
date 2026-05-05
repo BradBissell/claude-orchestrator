@@ -22,7 +22,7 @@ _TRANSCRIPTS_ROOT = Path.home() / ".claude" / "projects"
 
 
 def transcript_path(cwd: str, session_id: str) -> Path:
-    """`/home/brad/x/y` + `sid` → ~/.claude/projects/-home-brad-x-y/sid.jsonl"""
+    """`/home/alice/x/y` + `sid` → ~/.claude/projects/-home-alice-x-y/sid.jsonl"""
     encoded = cwd.replace("/", "-")
     return _TRANSCRIPTS_ROOT / encoded / f"{session_id}.jsonl"
 

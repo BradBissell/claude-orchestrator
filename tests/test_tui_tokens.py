@@ -42,9 +42,9 @@ def _write_jsonl(path: Path, *messages: dict[str, object]) -> None:
 
 
 def test_transcript_path_encodes_cwd() -> None:
-    p = transcript_path("/home/brad/work", "abc")
+    p = transcript_path("/home/alice/work", "abc")
     assert p.name == "abc.jsonl"
-    assert p.parent.name == "-home-brad-work"
+    assert p.parent.name == "-home-alice-work"
 
 
 # ---- _sum_tokens_in_file ---------------------------------------------------
@@ -180,9 +180,7 @@ def test_tracker_caches_until_mtime_or_size_changes(
     assert calls["n"] == 1
 
 
-def test_total_across_sums_all_agents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_total_across_sums_all_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tokens_module, "_TRANSCRIPTS_ROOT", tmp_path)
     a = _agent("a", "/h/x")
     b = _agent("b", "/h/y")

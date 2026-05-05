@@ -1,72 +1,96 @@
-# claude-orchestrator (`cco`)
+# cco — Claude Code Orchestrator for Linux
 
-Linux-native dashboard + lifecycle orchestrator for Claude Code sessions.
+[![CI](https://github.com/BradBissell/claude-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/BradBissell/claude-orchestrator/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 
-> **Status: pre-v0 (P0 bootstrap).** Not installable yet. See `docs/project-brief.md`.
+A Linux-native TUI that watches every Claude Code session you have
+running and tells you — at a glance — which ones need your attention,
+which are still working, and which went idle.
 
-## What it is
+![cco dashboard, healthy fleet](docs/stitch/healthy.png)
 
-`cco` watches every Claude Code session you have running and tells you, at a
-glance, which ones need your attention right now (permission requested, error,
-waiting on user input) and which are still working away. It's a Linux-native
-successor to [`clorch`](https://github.com/androsovm/clorch) — same hook-driven
-architecture, but built from the start to work on Wayland + ghostty + tmux,
-without the macOS-only AppleScript navigation layer that breaks on Linux.
+## Why
 
-## Why it exists
+Running 10+ Claude Code sessions in parallel is normal now. tmux shows
+you all of them, but tmux can't tell you that session 7 is blocked on
+a permission prompt while the other nine are still working. `cco`
+solves exactly that — and presses Enter to jump to the right tmux
+window.
 
-Running 10+ Claude Code sessions in parallel is normal now. tmux can show you
-all of them, but tmux can't tell you that session 7 is currently blocked on a
-permission prompt while the other 9 are still working — the kernel of need
-that `cco` solves.
-
-`clorch` solved this on macOS. On Ubuntu+Wayland+ghostty, half its features
-silently no-op: terminal-tab activation uses AppleScript, the activity
-collector never runs, state lives in `/tmp` and gets wiped on reboot, sound
-alerts don't play. `cco` rewrites those parts for Linux while reusing
-clorch's solid foundation (hook installer discipline, atomic-write pattern,
-state schema, tmux navigator).
-
-## Design highlights
-
-- **Hook-driven**: every state transition comes from a Claude Code hook event.
-  No tmux output scraping. No process introspection. No polling.
-- **POSIX shell hook handler** with per-session `flock`, fail-OPEN error
-  handling (a buggy hook never blocks claude), atomic state writes.
-- **State persists** in `$XDG_STATE_HOME/claude-orchestrator/sessions/`
-  (default `~/.local/state/claude-orchestrator/sessions/`), survives reboots,
-  files mode 0600.
-- **Auto-approve via hook return value**, not keystroke injection. Rules
-  engine can answer permission prompts before the user sees the dialog.
-- **tmux is the only navigation surface.** No AppleScript, no X11, no
-  Wayland window-poking. If a session isn't in tmux, navigation is a no-op
-  with a clear message.
-- **Same CLI shape as clorch** to minimise muscle-memory friction:
-  `cco`, `cco list`, `cco status`, `cco tmux-widget`, `cco init`,
-  `cco uninstall`.
-
-## Installation
+## Install
 
 ```bash
-# Pre-v0 — not yet installable. Once P0 is solid:
-pipx install --editable ~/projects/claude-orchestrator
-cco --version
+pipx install cco
+cco init           # installs the hooks into ~/.claude/settings.json
+cco                # launches the TUI dashboard
 ```
 
-## Roadmap
+(Or use `pip install --user cco` / `uv tool install cco`.)
 
-See `docs/project-brief.md` for the full plan. In short:
+## Quickstart
 
-- **v0 (5 days)** — bash-only hook + state writer + read-only CLI + tmux config
-- **v0 gate** — 1 week of dogfood before committing to v1
-- **v1 (~8.5 days)** — Textual TUI, reconciliation, libnotify, rules engine, claude-resume-recent integration
-- **v1.x** — activity collector, sparklines
+1. **`cco init`** — adds Claude Code hooks to `~/.claude/settings.json`
+   so every session reports its state. The original settings file is
+   backed up; `cco uninstall` cleanly removes them.
+2. **`cco`** — opens the TUI. Use `j`/`k` or arrow keys to navigate,
+   `/` to filter, `Enter` to jump to a session's tmux pane, `x` to
+   kill, `?` for the full keymap.
+3. **`cco list`** — script-friendly one-line-per-session status, for
+   tmux status-right widgets or shell scripts.
 
-## License
+See [`docs/getting-started.md`](docs/getting-started.md) for a longer
+walkthrough.
 
-MIT. Same as clorch — patches are friendly to backport upstream.
+## Highlights
+
+- **Hook-driven, not scraped.** State comes from official Claude Code
+  hook events — no terminal-output parsing, no AppleScript, no
+  Wayland window-poking. Works the same in Ghostty, Alacritty, kitty,
+  GNOME Terminal, or under `mosh`.
+- **tmux-native navigation.** Every session is mapped to its tmux
+  pane on every event, so `claude --resume` after a closed window
+  self-heals. Pressing Enter does `tmux select-window -t <pane>`
+  against your current client.
+- **Per-session state on disk.** `$XDG_STATE_HOME/claude-orchestrator/`,
+  mode 0600, atomic writes. Surviving a reboot is a feature.
+- **Per-account 5h / 7d usage strip.** Anchors against the official
+  `/api/oauth/usage` endpoint, then extrapolates with local ccusage
+  deltas — accurate without hammering the API.
+- **POSIX-shell hook handler** with `set -u`, sanitized PATH, jq
+  `--arg` everywhere, per-session flock, and fail-OPEN error handling
+  (a buggy hook never blocks Claude).
+- **Auto-approve via hook return value**, not keystroke injection.
+  Rules engine answers permission prompts before the dialog renders.
+
+## Design
+
+[`docs/architecture.md`](docs/architecture.md) walks through the
+components. Short version: the hook script writes JSON state, the
+TUI reads it. There is no daemon.
+
+## Privacy & security
+
+`cco` is a local tool. Nothing leaves your machine except for one
+authenticated call to `https://api.anthropic.com/api/oauth/usage` to
+compute per-account usage anchors. Full surface area in
+[`SECURITY.md`](SECURITY.md).
+
+## Requirements
+
+- Linux (any modern distro; tested on Ubuntu 24.04)
+- Python 3.11+
+- tmux 3.2+
+- Claude Code installed and at least one session run
 
 ## Contributing
 
-Pre-v0; not yet accepting external contributions. Once v1 ships and the repo
-goes public, see `CONTRIBUTING.md`.
+Bug reports and PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for dev setup, testing conventions, and PR guidelines. Security
+issues: see [`SECURITY.md`](SECURITY.md).
+
+## License
+
+MIT. Inspired by [`clorch`](https://github.com/androsovm/clorch) (the
+macOS-only ancestor); patches that improve cross-platform support
+upstream are encouraged.
