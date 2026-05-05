@@ -74,11 +74,7 @@ def test_extract_messages_handles_missing_file(tmp_path: Path) -> None:
 
 def test_extract_messages_skips_malformed_lines(tmp_path: Path) -> None:
     p = tmp_path / "t.jsonl"
-    p.write_text(
-        "not-json\n"
-        + json.dumps({"message": {"role": "user", "content": "good"}})
-        + "\n"
-    )
+    p.write_text("not-json\n" + json.dumps({"message": {"role": "user", "content": "good"}}) + "\n")
     msgs = _extract_messages(p)
     assert msgs == [{"role": "user", "content": "good"}]
 
@@ -144,9 +140,7 @@ def test_summarize_returns_empty_when_no_messages(
     assert summarize_transcript(p) == ""
 
 
-def test_summarize_returns_parsed_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_summarize_returns_parsed_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_claude_binary(monkeypatch)
     captured = _stub_subprocess_run(
         monkeypatch,
@@ -189,9 +183,7 @@ def test_summarize_sets_cco_internal_env_var(
     """Without CCO_INTERNAL=1, the cco hook handler would create a ghost
     session for our summarizer subprocess."""
     _stub_claude_binary(monkeypatch)
-    captured = _stub_subprocess_run(
-        monkeypatch, stdout=json.dumps({"result": "ok"})
-    )
+    captured = _stub_subprocess_run(monkeypatch, stdout=json.dumps({"result": "ok"}))
     p = tmp_path / "t.jsonl"
     _write_jsonl(p, {"message": {"role": "user", "content": "?"}})
 
@@ -204,9 +196,7 @@ def test_summarize_strips_quotes_and_trailing_period(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_claude_binary(monkeypatch)
-    _stub_subprocess_run(
-        monkeypatch, stdout=json.dumps({"result": '"Doing the thing."'})
-    )
+    _stub_subprocess_run(monkeypatch, stdout=json.dumps({"result": '"Doing the thing."'}))
     p = tmp_path / "t.jsonl"
     _write_jsonl(p, {"message": {"role": "user", "content": "?"}})
     assert summarize_transcript(p) == "Doing the thing"
@@ -216,9 +206,7 @@ def test_summarize_truncates_overly_long_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_claude_binary(monkeypatch)
-    _stub_subprocess_run(
-        monkeypatch, stdout=json.dumps({"result": "x" * 200})
-    )
+    _stub_subprocess_run(monkeypatch, stdout=json.dumps({"result": "x" * 200}))
     p = tmp_path / "t.jsonl"
     _write_jsonl(p, {"message": {"role": "user", "content": "?"}})
     out = summarize_transcript(p)
@@ -273,9 +261,7 @@ def test_summarize_returns_empty_when_result_field_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_claude_binary(monkeypatch)
-    _stub_subprocess_run(
-        monkeypatch, stdout=json.dumps({"session_id": "abc", "no_result": True})
-    )
+    _stub_subprocess_run(monkeypatch, stdout=json.dumps({"session_id": "abc", "no_result": True}))
     p = tmp_path / "t.jsonl"
     _write_jsonl(p, {"message": {"role": "user", "content": "?"}})
     assert summarize_transcript(p) == ""

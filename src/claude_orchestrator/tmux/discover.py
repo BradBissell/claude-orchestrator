@@ -174,9 +174,7 @@ def discover_panes() -> list[TmuxPaneInfo]:
         pid: (sess, win, pane_id) for pid, sess, win, pane_id, _ in panes
     }
     # Per-pane @claude_sid set by the hook handler — definitive when present.
-    sid_by_pane: dict[str, str] = {
-        pane_id: sid for _, _, _, pane_id, sid in panes if sid
-    }
+    sid_by_pane: dict[str, str] = {pane_id: sid for _, _, _, pane_id, sid in panes if sid}
 
     discovered: list[TmuxPaneInfo] = []
     for cpid in _claude_pids():

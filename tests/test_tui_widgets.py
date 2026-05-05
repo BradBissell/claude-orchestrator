@@ -93,9 +93,7 @@ async def test_app_renders_every_status_without_crashing(all_statuses_dir: Path)
     async with app.run_test() as pilot:  # type: ignore[arg-type]
         await pilot.pause()
         assert len(app._sid_by_row) == len(list(AgentStatus)) - 1
-        dead_sid = next(
-            f"sid-{i}" for i, s in enumerate(AgentStatus) if s is AgentStatus.DEAD
-        )
+        dead_sid = next(f"sid-{i}" for i, s in enumerate(AgentStatus) if s is AgentStatus.DEAD)
         assert dead_sid not in app._sid_by_row
 
 

@@ -380,8 +380,7 @@ def _cmd_doctor() -> int:
                 installed_events = [
                     ev
                     for ev, defs in hooks.items()
-                    if isinstance(defs, list)
-                    and any(handler_str in json.dumps(d) for d in defs)
+                    if isinstance(defs, list) and any(handler_str in json.dumps(d) for d in defs)
                 ]
                 if installed_events:
                     ok(

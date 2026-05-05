@@ -26,9 +26,7 @@ _SUMMARY_COL_WIDTH = 40  # LLM summary column on the primary row
 _SUBLINE_WIDTH = 70  # latest user prompt on the dim subline
 
 
-def is_heartbeat_stale(
-    agent: AgentState, threshold_sec: int = STALE_HEARTBEAT_SEC
-) -> bool:
+def is_heartbeat_stale(agent: AgentState, threshold_sec: int = STALE_HEARTBEAT_SEC) -> bool:
     """True iff the session is WORKING but its last hook event is too old.
 
     Used to flag sessions where claude_pid is still alive but the process
@@ -83,11 +81,7 @@ class SessionRow(Static):
     ) -> None:
         symbol, label, color = STATUS_DISPLAY[agent.status]
         spark = render_sparkline(samples or [])
-        err = (
-            f"[bold #f85149]E{agent.error_count}[/]"
-            if agent.error_count
-            else "[dim]E0[/]"
-        )
+        err = f"[bold #f85149]E{agent.error_count}[/]" if agent.error_count else "[dim]E0[/]"
         # WORKING + no recent hook = process is alive but stalled (model
         # timeout, network hang). Render a STALE marker that takes the place
         # of E-count when present so the row width is roughly stable.
@@ -98,14 +92,14 @@ class SessionRow(Static):
         # downstream columns stable.
         from claude_orchestrator.tui.tokens import format_tokens
 
-        tok_cell = (
-            f"[dim]{format_tokens(tokens):>6}[/]" if tokens else "[dim]     —[/]"
-        )
+        tok_cell = f"[dim]{format_tokens(tokens):>6}[/]" if tokens else "[dim]     —[/]"
         # Summary column: LLM-generated description of current activity, or
         # "—" placeholder so column width stays stable. Falls between project
         # name and the tool count.
         if summary:
-            summary_cell = f"[#dbe4e3]{_truncate(summary, _SUMMARY_COL_WIDTH):<{_SUMMARY_COL_WIDTH}}[/]"
+            summary_cell = (
+                f"[#dbe4e3]{_truncate(summary, _SUMMARY_COL_WIDTH):<{_SUMMARY_COL_WIDTH}}[/]"
+            )
         else:
             summary_cell = f"[dim]{'—':<{_SUMMARY_COL_WIDTH}}[/]"
 

@@ -167,9 +167,7 @@ def test_kill_unique_prefix_signals_pid_and_unlinks(
 # --- doctor --------------------------------------------------------------
 
 
-def test_doctor_runs_without_crashing(
-    state_dir: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_doctor_runs_without_crashing(state_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["doctor"])
     out = capsys.readouterr().out
     # Always exits 0 / 1 / 2 — never crashes — and prints a summary line.

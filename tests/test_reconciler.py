@@ -49,9 +49,7 @@ def test_returns_zero_counts_for_missing_dir(tmp_path: Path) -> None:
     assert not result.changed
 
 
-def test_leaves_live_pid_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_leaves_live_pid_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A session with a live claude_pid must never be deleted or reset."""
     monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: True)
     _write(
@@ -106,9 +104,7 @@ def test_resets_stuck_waiting_permission_when_pid_dead(
     assert after["notification"] is None
 
 
-def test_resets_waiting_answer_too(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resets_waiting_answer_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: False)
     _write(
         tmp_path / "stuck.json",
@@ -120,9 +116,7 @@ def test_resets_waiting_answer_too(
     assert result.reset == 1
 
 
-def test_does_not_reset_other_statuses(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_does_not_reset_other_statuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """ERROR, WORKING, IDLE — none of those should be touched, only WAITING_*."""
     monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: False)
     _write(
@@ -137,9 +131,7 @@ def test_does_not_reset_other_statuses(
     assert after["status"] == "ERROR"
 
 
-def test_skips_files_without_claude_pid(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_skips_files_without_claude_pid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pre-pid state files (claude_pid is None) shouldn't be deleted —
     they need a different recovery path (cco refresh-tmux)."""
     monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: False)
@@ -153,9 +145,7 @@ def test_skips_files_without_claude_pid(
     assert (tmp_path / "ancient.json").exists()
 
 
-def test_ignores_atomic_write_tempfiles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_ignores_atomic_write_tempfiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`.tmp.*` files come from concurrent atomic-write writers; never touch."""
     monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: False)
     (tmp_path / ".tmp.abc.json").write_text("garbage not even json")

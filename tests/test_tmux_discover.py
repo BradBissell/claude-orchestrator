@@ -543,14 +543,10 @@ def test_discover_uses_pane_claude_sid_option(monkeypatch: pytest.MonkeyPatch) -
     pgrep = "5678\n"
     monkeypatch.setattr(subprocess, "run", _fake_run_factory(panes, pgrep))
     monkeypatch.setattr(discover, "_read_proc_cwd", lambda pid: "/tmp/projX")
-    monkeypatch.setattr(
-        discover, "_read_proc_ppid", lambda pid: 1234 if pid == 5678 else None
-    )
+    monkeypatch.setattr(discover, "_read_proc_ppid", lambda pid: 1234 if pid == 5678 else None)
 
     # If discover read cmdline, it'd return this — but pane option must win.
-    monkeypatch.setattr(
-        discover, "_read_session_id_from_cmdline", lambda pid: "wrong-cmdline-sid"
-    )
+    monkeypatch.setattr(discover, "_read_session_id_from_cmdline", lambda pid: "wrong-cmdline-sid")
 
     found = discover.discover_panes()
     assert len(found) == 1
@@ -568,12 +564,8 @@ def test_discover_falls_back_to_cmdline_when_pane_option_unset(
     pgrep = "5678\n"
     monkeypatch.setattr(subprocess, "run", _fake_run_factory(panes, pgrep))
     monkeypatch.setattr(discover, "_read_proc_cwd", lambda pid: "/tmp/projX")
-    monkeypatch.setattr(
-        discover, "_read_proc_ppid", lambda pid: 1234 if pid == 5678 else None
-    )
-    monkeypatch.setattr(
-        discover, "_read_session_id_from_cmdline", lambda pid: "fallback-sid"
-    )
+    monkeypatch.setattr(discover, "_read_proc_ppid", lambda pid: 1234 if pid == 5678 else None)
+    monkeypatch.setattr(discover, "_read_session_id_from_cmdline", lambda pid: "fallback-sid")
 
     found = discover.discover_panes()
     assert len(found) == 1

@@ -114,9 +114,7 @@ def test_jump_uses_pane_id_avoiding_duplicate_window_name_failure(
         # Simulate the real-world failure: name-based targeting fails, pane-id
         # targeting succeeds.
         if "select-window" in args and any(a == "work:claude" for a in args):
-            return subprocess.CompletedProcess(
-                args, 1, "", "can't find window: claude"
-            )
+            return subprocess.CompletedProcess(args, 1, "", "can't find window: claude")
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -159,9 +157,7 @@ def test_jump_fails_when_pane_no_longer_hosts_claude_pid(
             return subprocess.CompletedProcess(args, 0, "", "")
         # select-window must NOT be reached when validation fails.
         if "select-window" in args:
-            raise AssertionError(
-                "select-window was called even though pane validation failed"
-            )
+            raise AssertionError("select-window was called even though pane validation failed")
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -274,7 +270,8 @@ def test_kill_session_tolerates_already_dead_pid(
 
     monkeypatch.setattr("claude_orchestrator.tmux.navigator.os.kill", raise_lookup)
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         lambda *a, **kw: subprocess.CompletedProcess(a, 0, "", ""),
     )
 

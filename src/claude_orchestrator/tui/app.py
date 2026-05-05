@@ -107,9 +107,7 @@ class CcoApp(App[int]):
             yield ListView(id="session-list")
             self._summary_line = Static("", id="summary-line")
             yield self._summary_line
-            self._filter_input = Input(
-                placeholder="filter (esc to clear)…", id="filter-input"
-            )
+            self._filter_input = Input(placeholder="filter (esc to clear)…", id="filter-input")
             self._filter_input.display = False
             yield self._filter_input
             self._toast = StatusToast("")
@@ -171,11 +169,7 @@ class CcoApp(App[int]):
         # clear()+rebuild and produce a visible flash every few seconds.
         new_set = set(new_sids)
         prev_set = set(self._sid_by_row)
-        if (
-            self._rows_by_sid
-            and new_set == prev_set
-            and len(new_sids) == len(self._sid_by_row)
-        ):
+        if self._rows_by_sid and new_set == prev_set and len(new_sids) == len(self._sid_by_row):
             cursor_sid = self._cursor_sid(list_view)
             self._update_rows(agents)
             self._reorder_list_view(list_view, new_sids)
@@ -411,10 +405,7 @@ class CcoApp(App[int]):
 
         label = agent.project_name or sid[:8]
         now = time.monotonic()
-        armed = (
-            self._kill_armed_sid == sid
-            and now - self._kill_armed_at < KILL_CONFIRM_WINDOW_SEC
-        )
+        armed = self._kill_armed_sid == sid and now - self._kill_armed_at < KILL_CONFIRM_WINDOW_SEC
 
         if not armed:
             self._kill_armed_sid = sid
@@ -561,9 +552,7 @@ class CcoApp(App[int]):
                 self._set_toast(f"summary updated for {sid[:8]}")
         elif manual:
             # Manual press deserves an explanation when summarization failed.
-            self._set_toast(
-                "summary unavailable — log in to Claude Code or set ANTHROPIC_API_KEY"
-            )
+            self._set_toast("summary unavailable — log in to Claude Code or set ANTHROPIC_API_KEY")
 
 
 # ---------------------------------------------------------------------------
@@ -657,16 +646,11 @@ def _render_summary_line(
         else:
             cap_color = "#A3BE8C"
         tok_segment = (
-            f"[dim]tokens: {tok_text} / {format_tokens(weekly_cap)} "
-            f"([{cap_color}]{pct}%[/])[/]"
+            f"[dim]tokens: {tok_text} / {format_tokens(weekly_cap)} ([{cap_color}]{pct}%[/])[/]"
         )
     else:
         tok_segment = f"[dim]tokens: {tok_text}[/]"
-    return (
-        f"[bold #00ffff]●[/] [bold]{active}[/] active   "
-        f"[#00ffff]{spark}[/]   "
-        f"{tok_segment}"
-    )
+    return f"[bold #00ffff]●[/] [bold]{active}[/] active   [#00ffff]{spark}[/]   {tok_segment}"
 
 
 def _agent_matches_filter(agent: AgentState, needle: str) -> bool:

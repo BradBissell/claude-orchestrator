@@ -9,17 +9,13 @@ import pytest
 from claude_orchestrator import account
 
 
-def test_returns_defaults_when_file_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_returns_defaults_when_file_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CCO_ACCOUNT_CONFIG", str(tmp_path / "missing.toml"))
     cfg = account.load_account_config()
     assert cfg.weekly_cap_tokens is None
 
 
-def test_loads_weekly_cap_from_toml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_loads_weekly_cap_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "account.toml"
     p.write_text("weekly_cap_tokens = 3_000_000\n")
     monkeypatch.setenv("CCO_ACCOUNT_CONFIG", str(p))
@@ -27,9 +23,7 @@ def test_loads_weekly_cap_from_toml(
     assert cfg.weekly_cap_tokens == 3_000_000
 
 
-def test_rejects_non_positive_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_rejects_non_positive_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "account.toml"
     p.write_text("weekly_cap_tokens = 0\n")
     monkeypatch.setenv("CCO_ACCOUNT_CONFIG", str(p))

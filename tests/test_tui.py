@@ -269,9 +269,7 @@ async def test_summarize_action_writes_to_store_and_repaints(
 ) -> None:
     """Pressing `s` triggers a (mocked) summarizer and persists the result."""
     summary_dir = tmp_path / "summaries"
-    monkeypatch.setattr(
-        "claude_orchestrator.summary_store.summary_dir", lambda: summary_dir
-    )
+    monkeypatch.setattr("claude_orchestrator.summary_store.summary_dir", lambda: summary_dir)
     monkeypatch.setattr(
         "claude_orchestrator.tui.app.summarize_transcript",
         lambda _path: "stubbed summary",
@@ -298,9 +296,7 @@ async def test_summarize_action_writes_to_store_and_repaints(
 async def test_summarize_action_with_no_selection_toasts(
     populated_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(
-        "claude_orchestrator.summary_store.summary_dir", lambda: tmp_path / "s"
-    )
+    monkeypatch.setattr("claude_orchestrator.summary_store.summary_dir", lambda: tmp_path / "s")
     app = CcoApp(manager=StateManager(populated_dir))
     captured: list[str] = []
     async with app.run_test() as pilot:  # type: ignore[arg-type]
@@ -385,6 +381,7 @@ async def test_next_attention_jumps_to_perm_row(
     async with app.run_test() as pilot:  # type: ignore[arg-type]
         await pilot.pause()
         from textual.widgets import ListView
+
         list_view = app.query_one(ListView)
         list_view.index = 0
         await pilot.press("n")
@@ -410,6 +407,7 @@ async def test_next_attention_wraps_when_past_last(
     async with app.run_test() as pilot:  # type: ignore[arg-type]
         await pilot.pause()
         from textual.widgets import ListView
+
         list_view = app.query_one(ListView)
         # Park cursor past the only attention row to force wrap.
         list_view.index = len(app._sid_by_row) - 1

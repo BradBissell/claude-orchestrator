@@ -171,9 +171,7 @@ def summarize_transcript(path: Path) -> str:
         return ""
 
     if proc.returncode != 0:
-        log.debug(
-            "claude -p exited %d: %s", proc.returncode, proc.stderr.strip()[:200]
-        )
+        log.debug("claude -p exited %d: %s", proc.returncode, proc.stderr.strip()[:200])
         return ""
 
     try:

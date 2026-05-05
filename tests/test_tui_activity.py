@@ -17,9 +17,7 @@ from claude_orchestrator.tui.activity import (
     _read_cpu_jiffies,
 )
 
-pytestmark = pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="requires /proc"
-)
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires /proc")
 
 
 def test_read_cpu_jiffies_for_self_returns_int() -> None:
