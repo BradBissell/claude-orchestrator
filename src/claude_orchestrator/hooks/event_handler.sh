@@ -211,8 +211,19 @@ populate_tmux_mapping() {
     cat
     return 0
   fi
+  # CRITICAL: target $TMUX_PANE explicitly. `tmux display-message -p`
+  # without `-t` returns info for the *active* pane in the session, not
+  # the pane the calling subprocess is running in — so hooks firing from
+  # an inactive pane would record the WRONG pane_id, and the dashboard's
+  # Enter-to-jump would land the user in whichever pane happened to be
+  # active when the hook last fired.
+  local target="${TMUX_PANE:-}"
   local info
-  info="$(tmux display-message -p $'#S\t#W\t#{pane_id}' 2>/dev/null)"
+  if [ -n "$target" ]; then
+    info="$(tmux display-message -t "$target" -p $'#S\t#W\t#{pane_id}' 2>/dev/null)"
+  else
+    info="$(tmux display-message -p $'#S\t#W\t#{pane_id}' 2>/dev/null)"
+  fi
   if [ -z "$info" ]; then
     cat
     return 0
