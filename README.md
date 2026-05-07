@@ -8,7 +8,7 @@ A Linux-native TUI that watches every Claude Code session you have
 running and tells you — at a glance — which ones need your attention,
 which are still working, and which went idle.
 
-![cco dashboard, healthy fleet](docs/stitch/healthy.png)
+<img width="2806" height="1972" alt="image" src="https://github.com/user-attachments/assets/50f4b678-2da8-4ee1-b52e-3d148ce4ae7c" />
 
 ## Why
 
