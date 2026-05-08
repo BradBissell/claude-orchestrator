@@ -222,6 +222,7 @@ def render_bar(
     *,
     label: str = "",
     queued_labels: list[str] | None = None,
+    muted: bool = False,
     width: int = _DEFAULT_WIDTH,
 ) -> str:
     """Pure formatter — produces a 5-line string (header + 4 message rows).
@@ -236,17 +237,22 @@ def render_bar(
 
     if state is None or not state.speaking or not state.session_id:
         # Idle state — header is dim + minimal; message region stays blank.
-        header = (
-            f"[{_INK_DIM}]\U0001f507 no speech[/]  "
-            f"[{_INK_DIM}]·  press [bold]t[/] to jump when active[/]"
-        )
+        if muted:
+            header = (
+                f"[{_INK_DIM}]\U0001f507 muted[/]  [{_INK_DIM}]·  press [bold]m[/] to unmute[/]"
+            )
+        else:
+            header = (
+                f"[{_INK_DIM}]\U0001f507 no speech[/]  "
+                f"[{_INK_DIM}]·  press [bold]t[/] to jump when active[/]"
+            )
         if queue_suffix:
             header += f"  [{_INK_DIM}]·  {queue_suffix}[/]"
         return "\n".join([header, *[""] * _MESSAGE_LINES])
 
     sid = state.session_id
     label_text = label or (sid[:8] if sid else "?")
-    icon = "\U0001f50a"
+    icon = "\U0001f507" if muted else "\U0001f50a"
     sentences = state.sentences
     now_ms = int(time.time() * 1000)
     idx = state.active_sentence_index(now_ms=now_ms) if sentences else 0
@@ -322,6 +328,7 @@ class SpeechBar(Static):
             # the file is mid-truncation or has a corrupt tail, just keep
             # the previous render and try again next tick.
             return
+        muted = bool(self._player and self._player.is_muted)
         # Use live widget width so wrapping matches the terminal. Falls
         # back to a sane default until the widget has been laid out (e.g.
         # in headless tests rendering before the first paint).
@@ -331,6 +338,7 @@ class SpeechBar(Static):
                 self._state,
                 label=self._label_for_state(),
                 queued_labels=[self._label_for_sid(sid) for sid in self._queued_sids],
+                muted=muted,
                 width=width,
             )
         )

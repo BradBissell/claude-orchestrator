@@ -99,7 +99,33 @@ def _inter_chunk_ms() -> int:
 
 
 def _chars_per_sec_speed1() -> float:
-    return max(1.0, _env_float("CCO_SPEECH_CHARS_PER_SEC", CHARS_PER_SEC_AT_SPEED_1))
+    """Resolve effective chars/sec at speed=1, in priority order:
+
+    1. CCO_SPEECH_CHARS_PER_SEC env var (manual override).
+    2. Calibrated rate persisted in speech_settings (learned from
+       observed playbacks — the bar matches the user's actual kokoro
+       reading speed once a few messages have completed).
+    3. Hardcoded default (CHARS_PER_SEC_AT_SPEED_1).
+    """
+    env = os.environ.get("CCO_SPEECH_CHARS_PER_SEC")
+    if env is not None:
+        try:
+            v = float(env)
+            if v > 0:
+                return max(1.0, v)
+        except (TypeError, ValueError):
+            pass
+    # Lazy import — speech_settings imports speech_player which imports
+    # this module's helpers. Top-level import would form a cycle.
+    try:
+        from claude_orchestrator.speech_settings import load as _load_settings
+
+        s = _load_settings()
+        if s.calibrated_chars_per_sec and s.calibrated_chars_per_sec > 0:
+            return max(1.0, s.calibrated_chars_per_sec)
+    except (ImportError, OSError):
+        pass
+    return CHARS_PER_SEC_AT_SPEED_1
 
 
 def split_sentences(text: str) -> list[str]:

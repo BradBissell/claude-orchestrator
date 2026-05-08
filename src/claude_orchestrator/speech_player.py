@@ -80,6 +80,10 @@ class QueueItem:
 class _PlaybackHandle:
     item: QueueItem
     proc: subprocess.Popen | None  # None when playback couldn't start
+    # Wall-clock time when `_start` spawned the subprocess. Used to
+    # calibrate chars/sec on natural completion. 0.0 for items started
+    # under the null spawner — those don't contribute to calibration.
+    started_at: float = 0.0
 
 
 # Spawner signature: takes a QueueItem, returns a Popen (or None if it
@@ -131,6 +135,7 @@ class SpeechPlayer:
         spawner: Spawner | None = None,
         watcher: SpeechWatcher | None = None,
         max_queue: int = MAX_QUEUE,
+        muted: bool = False,
     ) -> None:
         if spawner is None:
             cmd = default_tts_command()
@@ -140,6 +145,11 @@ class SpeechPlayer:
         self._max_queue = max_queue
         self._queue: list[QueueItem] = []
         self._current: _PlaybackHandle | None = None
+        # When muted, the queue still tracks items (so the bar mirrors
+        # what WOULD play and the user can spot active sessions) but the
+        # spawner is bypassed — no audio. Toggling mute terminates any
+        # in-flight playback.
+        self._muted = muted
 
     # ---- introspection (used by SpeechBar / tests) -----------------------
 
@@ -150,6 +160,26 @@ class SpeechPlayer:
     @property
     def queue_snapshot(self) -> list[QueueItem]:
         return list(self._queue)
+
+    @property
+    def is_muted(self) -> bool:
+        return self._muted
+
+    def set_muted(self, muted: bool) -> None:
+        """Flip the audio gate.
+
+        When transitioning unmuted→muted with a live subprocess, kill
+        the audio process group but **keep the item as "current"** with
+        proc=None — the bar continues to show what would be playing,
+        and the natural reap-on-estimated-duration logic will advance
+        the queue at the right time.
+        """
+        was_muted = self._muted
+        self._muted = bool(muted)
+        if was_muted == self._muted:
+            return
+        if self._muted and self._current is not None and self._current.proc is not None:
+            self._silence_current()
 
     # ---- public API ------------------------------------------------------
 
@@ -228,11 +258,35 @@ class SpeechPlayer:
             self.stop(sid)
 
     def _start(self, item: QueueItem) -> None:
-        proc = self._spawn(item)
-        self._current = _PlaybackHandle(item=item, proc=proc)
-        # If the spawner returned None (kokoro missing, etc.) we treat it
-        # as instant-completion so the queue still drains. The bar will
-        # show the item briefly and then advance.
+        # When muted, deliberately route through the null spawner so the
+        # bar still ticks but no audio plays. Queue advances on the
+        # estimated-duration timer (see _reap_if_finished).
+        proc = _null_spawner(item) if self._muted else self._spawn(item)
+        # started_at = 0 for null-spawner items so calibration ignores
+        # them (no real audio played, observed duration is meaningless).
+        started_at = time.time() if proc is not None else 0.0
+        self._current = _PlaybackHandle(item=item, proc=proc, started_at=started_at)
+
+    def _silence_current(self) -> None:
+        """Kill the in-flight subprocess but keep ``_current`` populated
+        with ``proc=None``. Used when muting mid-playback: the bar still
+        shows the speaker, the natural reap-on-estimated-duration timer
+        decides when to advance to whatever's queued behind it."""
+        if self._current is None or self._current.proc is None:
+            return
+        proc = self._current.proc
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                with _suppress_lookup():
+                    proc.terminate()
+            try:
+                proc.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                with _suppress_lookup():
+                    os.killpg(proc.pid, signal.SIGKILL)
+        self._current = _PlaybackHandle(item=self._current.item, proc=None)
 
     def _terminate_current(self) -> None:
         if self._current is None:
@@ -272,6 +326,12 @@ class SpeechPlayer:
                 self._advance()
             return
         if proc.poll() is not None:
+            # Natural completion: clean exit, not preempted/muted/stopped.
+            # Feed observed duration into the rate calibrator so the next
+            # playback's progress bar matches actual kokoro speed.
+            if proc.returncode == 0 and self._current.started_at > 0:
+                duration = time.time() - self._current.started_at
+                _calibrate_rate(item, duration)
             self._current = None
             self._advance()
 
@@ -313,3 +373,61 @@ def kokoro_available() -> bool:
     if cmd is None:
         return False
     return shutil.which(cmd[0]) is not None or Path(cmd[0]).is_file()
+
+
+# Calibration: weight on each new sample. 0.3 gives a few-message decay
+# (older samples fade out over ~5-10 messages). Higher = faster reaction
+# to changes (e.g. user changed KOKORO_SPEED), lower = more stability.
+_CALIBRATION_WEIGHT = 0.3
+# Lower bound on text length for a sample to be admitted. Tiny messages
+# are dominated by startup latency and produce noisy estimates.
+_CALIBRATION_MIN_CHARS = 100
+# Plausibility window for an observed rate (chars/sec at speed=1).
+# Anything outside this is almost certainly a measurement artifact
+# (network hiccup, kokoro crash) and gets ignored.
+_CALIBRATION_RATE_MIN = 5.0
+_CALIBRATION_RATE_MAX = 50.0
+
+
+def _calibrate_rate(item: QueueItem, duration_seconds: float) -> None:
+    """Update the persisted chars/sec rolling average from one observed
+    playback. Caller must guarantee:
+
+      * Subprocess exited cleanly (returncode == 0)
+      * Playback was NOT preempted/muted/stopped (otherwise the duration
+        is truncated and would skew the average low)
+      * started_at was a real wall-clock time (not the null-spawner case)
+
+    Failure modes (corrupt settings file, write errors) are swallowed —
+    calibration is a nice-to-have, never crashes the dashboard.
+    """
+    chars = len(item.text)
+    if chars < _CALIBRATION_MIN_CHARS or duration_seconds < 2.0:
+        return
+
+    # Subtract the same startup latency the bar's estimator uses, so the
+    # calibrated rate is comparable to the un-calibrated default.
+    from claude_orchestrator.speech import _startup_latency_ms
+
+    audio_seconds = max(1.0, duration_seconds - _startup_latency_ms() / 1000.0)
+    rate_at_this_speed = chars / audio_seconds
+    rate_at_speed_1 = rate_at_this_speed / max(0.5, item.speed)
+
+    if rate_at_speed_1 < _CALIBRATION_RATE_MIN or rate_at_speed_1 > _CALIBRATION_RATE_MAX:
+        return
+
+    try:
+        from claude_orchestrator.speech_settings import load, save
+
+        current = load().calibrated_chars_per_sec
+        if current is None:
+            new_rate = rate_at_speed_1
+        else:
+            # Exponentially-weighted moving average: heavy on history
+            # for stability, but new samples nudge it toward the truth.
+            new_rate = current * (1 - _CALIBRATION_WEIGHT) + rate_at_speed_1 * _CALIBRATION_WEIGHT
+        save(calibrated_chars_per_sec=new_rate)
+    except (ImportError, OSError):
+        # Calibration is opportunistic — don't disturb playback if disk
+        # is unavailable.
+        pass

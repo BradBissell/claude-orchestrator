@@ -90,6 +90,25 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print which hook entries would be removed without writing.",
     )
+    speech_sub.add_parser(
+        "enable",
+        help="Persistently enable TTS playback in cco (overrides default).",
+    )
+    speech_sub.add_parser(
+        "disable",
+        help="Persistently disable TTS playback in cco. The bar still shows speech, but no audio.",
+    )
+    speech_sub.add_parser(
+        "status",
+        help="Show whether TTS is currently enabled and which layer (env/file/default) decided.",
+    )
+    speech_sub.add_parser(
+        "reset-calibration",
+        help=(
+            "Forget the learned chars/sec rate. Next message starts fresh; "
+            "useful after changing KOKORO_VOICE / KOKORO_SPEED."
+        ),
+    )
 
     return parser
 
@@ -127,6 +146,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         sub = getattr(args, "speech_command", None)
         if sub == "install":
             return _cmd_speech_install(dry_run=bool(args.dry_run))
+        if sub == "enable":
+            return _cmd_speech_set(enabled=True)
+        if sub == "disable":
+            return _cmd_speech_set(enabled=False)
+        if sub == "status":
+            return _cmd_speech_status()
+        if sub == "reset-calibration":
+            return _cmd_speech_reset_calibration()
         # No subcommand → show help.
         parser.parse_args(["speech", "--help"])
         return 0
@@ -246,6 +273,78 @@ def _cmd_init(*, dry_run: bool) -> int:
         print("\n[dry-run] no changes written.")
     elif plan.events_to_add:
         print("\nDone. Restart any active Claude Code sessions to pick up the new hooks.")
+    return 0
+
+
+def _cmd_speech_set(*, enabled: bool) -> int:
+    """Persist the TTS-enabled choice to ~/.config/claude-orchestrator/speech.json.
+
+    Note: an env-var override (CCO_TTS_ENABLED) wins over the persisted
+    file. We surface that fact when relevant so the user isn't surprised
+    that their `cco speech disable` "didn't take."
+    """
+    from claude_orchestrator import speech_settings
+
+    try:
+        path = speech_settings.save(enabled=enabled)
+    except OSError as exc:
+        print(f"cco: failed to save settings: {exc}", file=sys.stderr)
+        return 1
+    state = "enabled" if enabled else "disabled"
+    print(f"TTS playback in cco: {state}")
+    print(f"Saved to: {path}")
+    if os.environ.get(speech_settings.ENV_VAR) is not None:
+        print(
+            f"\nNote: {speech_settings.ENV_VAR} is set in your shell — "
+            f"that env override will win until you `unset {speech_settings.ENV_VAR}`."
+        )
+    return 0
+
+
+def _cmd_speech_status() -> int:
+    """Print the resolved TTS state and which layer set it."""
+    from claude_orchestrator import speech, speech_player, speech_settings
+
+    s = speech_settings.load()
+    state = "ENABLED" if s.enabled else "DISABLED"
+    print(f"TTS playback: {state}  (decided by: {s.source.value})")
+    print(f"Settings file: {speech_settings.settings_path()}")
+    env_raw = os.environ.get(speech_settings.ENV_VAR)
+    if env_raw is not None:
+        print(f"Env override: {speech_settings.ENV_VAR}={env_raw!r}")
+    cmd = speech_player.default_tts_command()
+    if cmd is None:
+        print("Kokoro pipeline: NOT FOUND (cco can't actually play audio yet)")
+    else:
+        print(f"Kokoro pipeline: {cmd[0]}")
+
+    # Calibration line: surface what rate the bar will use AND why.
+    if s.calibrated_chars_per_sec:
+        print(
+            f"Calibrated rate: {s.calibrated_chars_per_sec:.1f} chars/sec "
+            f"at speed=1  (learned from observed playback)"
+        )
+    else:
+        print(
+            f"Calibrated rate: not yet learned  (using default "
+            f"{speech.CHARS_PER_SEC_AT_SPEED_1:.1f} chars/sec at speed=1)"
+        )
+    rate_env = os.environ.get("CCO_SPEECH_CHARS_PER_SEC")
+    if rate_env is not None:
+        print(f"Rate override: CCO_SPEECH_CHARS_PER_SEC={rate_env!r} (wins over calibration)")
+    return 0
+
+
+def _cmd_speech_reset_calibration() -> int:
+    """Forget the learned chars/sec rate so next playback starts fresh."""
+    from claude_orchestrator import speech_settings
+
+    try:
+        speech_settings.save(clear_calibration=True)
+    except OSError as exc:
+        print(f"cco: failed to save settings: {exc}", file=sys.stderr)
+        return 1
+    print("Calibration cleared. Next playback will recalibrate from scratch.")
     return 0
 
 

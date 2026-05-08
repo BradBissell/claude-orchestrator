@@ -265,6 +265,235 @@ def test_tick_advances_after_subprocess_exits(
     assert player.now_playing.session_id == "beta"  # type: ignore[union-attr]
 
 
+# ---- mute ---------------------------------------------------------------
+
+
+def test_player_starts_unmuted_by_default(player: SpeechPlayer) -> None:
+    assert player.is_muted is False
+
+
+def test_muted_player_does_not_spawn_real_subprocess(
+    proc_log: list[FakeProc],
+) -> None:
+    """When muted, the player still tracks the queue (so the bar mirrors
+    activity) but spawner is bypassed — no audio."""
+    import claude_orchestrator.speech_player as sp
+
+    sp.os.killpg = lambda *_a, **_k: None  # type: ignore[assignment]
+
+    def spawner(_item: QueueItem) -> FakeProc:
+        proc = FakeProc()
+        proc_log.append(proc)
+        return proc  # type: ignore[return-value]
+
+    player = SpeechPlayer(spawner=spawner, muted=True)
+    player.enqueue(_item("a"))
+    assert player.now_playing is not None  # tracked in current
+    assert player.now_playing.session_id == "a"
+    assert proc_log == []  # but no subprocess spawned
+
+
+def test_muting_mid_playback_silences_but_keeps_current(
+    player: SpeechPlayer, proc_log: list[FakeProc]
+) -> None:
+    """Pressing mute while audio is playing should kill the audio
+    immediately but keep the item visible on the bar — UX expectation
+    is "shut up", not "skip ahead." Natural reap timing handles
+    advancing to the next queued item."""
+    player.enqueue(_item("a"))
+    proc_a = proc_log[-1]
+    assert player.is_muted is False
+    player.set_muted(True)
+    assert player.is_muted is True
+    # Subprocess was killed (terminate or wait set returncode).
+    assert proc_a.poll() is not None
+    # Item is still "current" so the bar continues to render it.
+    assert player.now_playing is not None
+    assert player.now_playing.session_id == "a"
+
+
+def test_unmute_does_not_restart_playback(player: SpeechPlayer, proc_log: list[FakeProc]) -> None:
+    """Unmuting mid-message shouldn't replay the same item from scratch.
+    The current item finishes its silent run; subsequent items play
+    aloud as normal."""
+    player.set_muted(True)
+    player.enqueue(_item("a"))
+    assert proc_log == []
+    player.set_muted(False)
+    # No retroactive spawn for the already-current item.
+    assert proc_log == []
+    # New enqueues for a different session DO spawn (preempt unrelated).
+    proc_log.clear()
+
+
+def test_unmute_then_new_item_spawns_audio(player: SpeechPlayer, proc_log: list[FakeProc]) -> None:
+    player.set_muted(True)
+    player.enqueue(_item("a"))
+    # Drain `a` synthetically so queue is empty.
+    player.stop("a")
+    proc_log.clear()
+    player.set_muted(False)
+    player.enqueue(_item("b"))
+    assert len(proc_log) == 1
+
+
+def test_set_muted_idempotent(player: SpeechPlayer, proc_log: list[FakeProc]) -> None:
+    player.enqueue(_item("a"))
+    proc_a = proc_log[-1]
+    player.set_muted(False)  # was already unmuted
+    assert proc_a.poll() is None  # not killed
+
+
+# ---- calibration --------------------------------------------------------
+
+
+def test_natural_completion_updates_calibrated_rate(
+    proc_log: list[FakeProc],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a real subprocess exits cleanly, the player records the
+    observed chars/sec back to speech_settings so the next playback's
+    progress estimate matches actual kokoro speed."""
+    monkeypatch.setenv("CCO_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("CCO_TTS_ENABLED", raising=False)
+    monkeypatch.delenv("CCO_SPEECH_CHARS_PER_SEC", raising=False)
+
+    import claude_orchestrator.speech_player as sp
+    from claude_orchestrator import speech_settings
+
+    sp.os.killpg = lambda *_a, **_k: None  # type: ignore[assignment]
+
+    # Fake "now" so we can control the observed duration deterministically.
+    base_time = 1_000_000.0
+    monkeypatch.setattr(sp.time, "time", lambda: base_time)
+
+    def spawner(_item: QueueItem) -> FakeProc:
+        proc = FakeProc()
+        proc_log.append(proc)
+        return proc  # type: ignore[return-value]
+
+    player = SpeechPlayer(spawner=spawner)
+    text = "x" * 500  # well over the calibration min (100 chars)
+    player.enqueue(QueueItem(session_id="a", text=text, sentences=[text], speed=1.0))
+    proc_log[-1].finish()
+    # Advance "now" by 30 wall-clock seconds, then tick to reap.
+    monkeypatch.setattr(sp.time, "time", lambda: base_time + 30.0)
+    player.tick()
+
+    rate = speech_settings.load().calibrated_chars_per_sec
+    assert rate is not None
+    # 500 chars / (30s - 1.5s startup) ≈ 17.5 chars/sec.
+    assert 15.0 <= rate <= 20.0
+
+
+def test_preempted_playback_does_not_calibrate(
+    proc_log: list[FakeProc],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A killed playback's duration is truncated and would skew the
+    rolling average low. Make sure preempt → no calibration."""
+    monkeypatch.setenv("CCO_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("CCO_TTS_ENABLED", raising=False)
+
+    import claude_orchestrator.speech_player as sp
+    from claude_orchestrator import speech_settings
+
+    sp.os.killpg = lambda *_a, **_k: None  # type: ignore[assignment]
+
+    def spawner(_item: QueueItem) -> FakeProc:
+        proc = FakeProc()
+        proc_log.append(proc)
+        return proc  # type: ignore[return-value]
+
+    player = SpeechPlayer(spawner=spawner)
+    text = "x" * 500
+    player.enqueue(QueueItem(session_id="a", text=text, sentences=[text], speed=1.0))
+    # Same-session preempt — kills the in-flight proc.
+    player.enqueue(QueueItem(session_id="a", text=text, sentences=[text], speed=1.0))
+
+    rate = speech_settings.load().calibrated_chars_per_sec
+    assert rate is None  # preempted samples shouldn't ever land in calibration
+
+
+def test_short_text_is_not_calibrated(
+    proc_log: list[FakeProc],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiny messages are dominated by startup latency and produce noisy
+    estimates. Player should skip calibration below the threshold."""
+    monkeypatch.setenv("CCO_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("CCO_TTS_ENABLED", raising=False)
+
+    import claude_orchestrator.speech_player as sp
+    from claude_orchestrator import speech_settings
+
+    sp.os.killpg = lambda *_a, **_k: None  # type: ignore[assignment]
+    base_time = 1_000_000.0
+    monkeypatch.setattr(sp.time, "time", lambda: base_time)
+
+    def spawner(_item: QueueItem) -> FakeProc:
+        proc = FakeProc()
+        proc_log.append(proc)
+        return proc  # type: ignore[return-value]
+
+    player = SpeechPlayer(spawner=spawner)
+    short = "Done."  # 5 chars, below threshold
+    player.enqueue(QueueItem(session_id="a", text=short, sentences=[short], speed=1.0))
+    proc_log[-1].finish()
+    monkeypatch.setattr(sp.time, "time", lambda: base_time + 3.0)
+    player.tick()
+
+    rate = speech_settings.load().calibrated_chars_per_sec
+    assert rate is None
+
+
+def test_calibration_uses_exponential_moving_average(
+    proc_log: list[FakeProc],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single bad reading shouldn't yank the rate; multiple consistent
+    readings should converge."""
+    monkeypatch.setenv("CCO_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("CCO_TTS_ENABLED", raising=False)
+
+    import claude_orchestrator.speech_player as sp
+    from claude_orchestrator import speech_settings
+
+    sp.os.killpg = lambda *_a, **_k: None  # type: ignore[assignment]
+
+    def spawner(_item: QueueItem) -> FakeProc:
+        proc = FakeProc()
+        proc_log.append(proc)
+        return proc  # type: ignore[return-value]
+
+    base_time = 1_000_000.0
+
+    def fake_time(offset: float = 0) -> float:
+        return base_time + offset
+
+    # Feed a stable rate of ~20 chars/sec across 5 messages.
+    monkeypatch.setattr(sp.time, "time", lambda: fake_time(0))
+    player = SpeechPlayer(spawner=spawner)
+    text = "y" * 500
+    elapsed = 0
+    for _ in range(5):
+        monkeypatch.setattr(sp.time, "time", lambda e=elapsed: fake_time(e))
+        player.enqueue(QueueItem(session_id="a", text=text, sentences=[text], speed=1.0))
+        proc_log[-1].finish()
+        elapsed += 26.5  # 500 / (26.5 - 1.5) ≈ 20 chars/sec
+        monkeypatch.setattr(sp.time, "time", lambda e=elapsed: fake_time(e))
+        player.tick()
+
+    rate = speech_settings.load().calibrated_chars_per_sec
+    assert rate is not None
+    # Should converge close to 20.
+    assert 18.0 <= rate <= 22.0
+
+
 # ---- watcher unit -------------------------------------------------------
 
 

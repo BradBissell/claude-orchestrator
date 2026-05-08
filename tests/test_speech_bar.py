@@ -174,6 +174,65 @@ async def test_jump_speaking_toasts_when_nothing_is_speaking(
         assert app._toast is not None
 
 
+# ---- mute hotkey --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_action_toggle_mute_flips_player_and_persists(
+    populated_dir: Path,
+    speech_log: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`m` flips the player's mute state AND writes the new value to disk
+    so the choice survives a cco restart."""
+    monkeypatch.setenv("CCO_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("CCO_TTS_ENABLED", raising=False)
+    from claude_orchestrator import speech_settings
+
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        starting = app._speech_player.is_muted
+
+        app.action_toggle_mute()
+        await pilot.pause()
+        assert app._speech_player.is_muted is not starting
+
+        # Persistence: the file now reflects the toggled state.
+        loaded = speech_settings.load()
+        assert loaded.enabled is starting  # enabled inverts muted
+
+        # Toggle again returns to the original.
+        app.action_toggle_mute()
+        await pilot.pause()
+        assert app._speech_player.is_muted is starting
+
+
+@pytest.mark.asyncio
+async def test_bar_shows_muted_icon_when_muted(
+    populated_dir: Path,
+    speech_log: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CCO_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("CCO_TTS_ENABLED", raising=False)
+
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        # Force muted from a known starting state.
+        app._speech_player.set_muted(True)
+        speech.append_start("alpha-id", "Some response.")
+        app._speech_player.tick()
+        app._speech_bar.refresh_now()  # type: ignore[union-attr]
+        rendered = str(app._speech_bar.render())  # type: ignore[union-attr]
+        # 🔇 muted glyph; no 🔊.
+        assert "🔇" in rendered
+        assert "🔊" not in rendered
+
+
 # ---- per-row speaking indicator -----------------------------------------
 
 

@@ -60,6 +60,8 @@ from claude_orchestrator.account_usage import (
 from claude_orchestrator.constants import AgentStatus
 from claude_orchestrator.speech import SpeechWatcher
 from claude_orchestrator.speech_player import SpeechPlayer
+from claude_orchestrator.speech_settings import load as load_speech_settings
+from claude_orchestrator.speech_settings import save as save_speech_settings
 from claude_orchestrator.state.manager import StateManager
 from claude_orchestrator.state.models import AgentState, StatusSummary
 from claude_orchestrator.state.reconciler import reconcile
@@ -119,6 +121,7 @@ class CcoApp(App[int]):
         Binding("x", "kill", "kill selected session"),
         Binding("s", "summarize", "summarize selected session"),
         Binding("t", "jump_speaking", "jump to TTS speaking session"),
+        Binding("m", "toggle_mute", "mute / unmute TTS playback"),
         Binding("n", "next_attention", "jump cursor to next PERM/WAIT/ERR row"),
         Binding("slash", "filter", "filter sessions by substring"),
         Binding("escape", "clear_filter", "clear filter", show=False),
@@ -138,10 +141,14 @@ class CcoApp(App[int]):
         self._speech_bar: SpeechBar | None = None
         # cco owns TTS playback when running. The watcher tails the
         # speech log; the player is the FIFO queue + subprocess manager.
-        # When cco isn't running, the user's tts-speak-response hook
-        # plays directly (legacy fallback) — `cco speech install`
-        # disables the hook for users who want cco to be authoritative.
-        self._speech_player = SpeechPlayer(watcher=SpeechWatcher())
+        # The persisted "muted" setting (env > file > default) decides
+        # whether audio is gated at startup; the `m` hotkey flips it
+        # live and writes back.
+        self._speech_settings = load_speech_settings()
+        self._speech_player = SpeechPlayer(
+            watcher=SpeechWatcher(),
+            muted=not self._speech_settings.enabled,
+        )
         self._activity = ActivitySampler()
         self._tokens = TokenTracker()
         self._account: AccountConfig = load_account_config()
@@ -772,6 +779,36 @@ class CcoApp(App[int]):
             self._set_toast(f"→ jumped to {agent.project_name or sid[:8]} (speaking)")
             return
         self._set_toast(_jump_error(outcome.result, outcome.detail))
+
+    def action_toggle_mute(self) -> None:
+        """Flip the TTS mute state. Saves to ~/.config/claude-orchestrator/
+        speech.json so the choice persists across cco restarts.
+
+        The CCO_TTS_ENABLED env var, if set, will still override this
+        on next launch — we surface that fact in the toast so the user
+        isn't surprised when their hotkey toggle "doesn't stick."
+        """
+        new_muted = not self._speech_player.is_muted
+        self._speech_player.set_muted(new_muted)
+        try:
+            save_speech_settings(enabled=not new_muted)
+        except OSError as exc:
+            # Best-effort persistence — keep the in-memory toggle even
+            # if disk write fails (e.g. read-only home dir).
+            self._set_toast(f"muted (couldn't save: {exc})")
+            return
+
+        msg = "🔇 TTS muted" if new_muted else "🔊 TTS unmuted"
+
+        from claude_orchestrator.speech_settings import ENV_VAR, SettingsSource
+
+        if self._speech_settings.source == SettingsSource.ENV:
+            msg += f" (note: {ENV_VAR} env will reapply on next launch)"
+        self._set_toast(msg)
+        # Force the bar to redraw immediately so the user sees the icon
+        # change without waiting for the 200ms tick.
+        if self._speech_bar is not None:
+            self._speech_bar.refresh_now()
 
     # ---- utilities ------------------------------------------------------
 
