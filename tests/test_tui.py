@@ -99,7 +99,7 @@ async def test_jump_action_invokes_navigator(
         await pilot.pause()
         # Directly invoke the action — testing the binding wiring is
         # Textual's job; we just want to confirm the action calls jump_to.
-        app.action_jump()
+        await app.action_jump()
         await pilot.pause()
 
     assert len(captured) == 1, "action_jump should call jump_to exactly once"
@@ -224,7 +224,7 @@ async def test_jump_retries_with_rediscovery_on_stale_pane(
     app = CcoApp(manager=StateManager(populated_dir))
     async with app.run_test() as pilot:  # type: ignore[arg-type]
         await pilot.pause()
-        app.action_jump()
+        await app.action_jump()
         await pilot.pause()
 
     assert len(jump_calls) == 2, "should retry jump_to once after enrich rewrites state"
@@ -256,7 +256,7 @@ async def test_jump_does_not_rediscover_on_unrecoverable_failures(
     app = CcoApp(manager=StateManager(populated_dir))
     async with app.run_test() as pilot:  # type: ignore[arg-type]
         await pilot.pause()
-        app.action_jump()
+        await app.action_jump()
         await pilot.pause()
 
     assert len(jump_calls) == 1, "no retry expected for non-tmux-ref failures"
@@ -311,11 +311,15 @@ async def test_summarize_action_with_no_selection_toasts(
 
 
 @pytest.mark.asyncio
-async def test_reorder_path_preserves_listitem_widgets(populated_dir: Path) -> None:
-    """When only the sort order changes, rows are reordered in place.
+async def test_session_order_is_stable_across_event_time_changes(
+    populated_dir: Path,
+) -> None:
+    """The dashboard sorts by (started_at, session_id) so existing rows
+    never shift when a hook fires on one of them.
 
-    The original ListItem widgets must survive across the refresh so the
-    ListView doesn't get cleared+rebuilt (which produces a visible flash).
+    Regression: previously sort was by last_event_time desc, which made
+    every PreToolUse event reshuffle the list — visually disorienting,
+    and the cause of the now-fixed Path-2 reorder flash.
     """
     app = CcoApp(manager=StateManager(populated_dir))
     async with app.run_test() as pilot:  # type: ignore[arg-type]
@@ -324,8 +328,7 @@ async def test_reorder_path_preserves_listitem_widgets(populated_dir: Path) -> N
         original_sids = list(app._sid_by_row)
         assert len(original_items) == 3
 
-        # Bump beta-id's last_event_time so it sorts to the top, changing
-        # the order without changing the set of session_ids.
+        # Touch beta-id's last_event_time. Order MUST NOT change.
         _write_state(
             populated_dir,
             "beta-id",
@@ -333,14 +336,40 @@ async def test_reorder_path_preserves_listitem_widgets(populated_dir: Path) -> N
             tool_count=2,
             last_event_time="2030-01-01T00:00:00Z",
         )
-        app._refresh_table()
+        await app._refresh_table()
         await pilot.pause()
 
-        assert app._sid_by_row[0] == "beta-id"
-        assert set(app._sid_by_row) == set(original_sids)
-        # Same widget objects — proves move_child path was taken, not rebuild.
+        assert app._sid_by_row == original_sids, (
+            "session order should be stable when last_event_time changes"
+        )
+        # Same widget objects — proves the no-op (Path 1) path ran.
         for sid, item in original_items.items():
             assert app._items_by_sid[sid] is item
+
+
+@pytest.mark.asyncio
+async def test_new_session_appears_at_bottom_without_reordering(
+    populated_dir: Path,
+) -> None:
+    """Sort by started_at ascending means a newly-started session lands at
+    the bottom of the list and doesn't push existing rows around."""
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        original_sids = list(app._sid_by_row)
+
+        # Add a new session with a LATER started_at — must end up at bottom.
+        _write_state(
+            populated_dir,
+            "delta-id",
+            project_name="delta",
+            started_at="2099-01-01T00:00:00Z",
+        )
+        await app._refresh_table()
+        await pilot.pause()
+
+        assert app._sid_by_row[: len(original_sids)] == original_sids
+        assert app._sid_by_row[-1] == "delta-id"
 
 
 @pytest.mark.asyncio
@@ -441,12 +470,12 @@ async def test_filter_action_hides_non_matching_rows(populated_dir: Path) -> Non
         assert len(app._sid_by_row) == 3
 
         app._filter = "alpha"
-        app._refresh_table()
+        await app._refresh_table()
         await pilot.pause()
         assert app._sid_by_row == ["alpha-id"]
 
         # Clearing the filter restores all rows.
-        app.action_clear_filter()
+        await app.action_clear_filter()
         await pilot.pause()
         assert set(app._sid_by_row) == {"alpha-id", "beta-id", "gamma-id"}
 
@@ -476,3 +505,301 @@ def test_summary_line_omits_cap_when_unset() -> None:
     # not a slash separator.
     assert " / " not in line
     assert "tokens:" in line
+
+
+# ---- regression: Enter must stay rock-solid -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cold_path_refresh_keeps_dom_and_state_in_sync(
+    populated_dir: Path,
+) -> None:
+    """After a cold-path rebuild (sessions added/removed) the ListView's
+    children, list_view.index, and self._sid_by_row must all agree.
+
+    This is the regression test for the flakiness root-cause: ListView.clear()
+    and .append() are async (return AwaitRemove/AwaitMount) but the previous
+    code fired them synchronously, so `_sid_by_row` was overwritten before
+    the DOM had finished reshaping. An Enter keypress landing in that window
+    saw `list_view.index = None` (clear() resets it) but `_sid_by_row`
+    populated, producing a "no row selected" toast even though the visible
+    list looked normal.
+    """
+    from textual.widgets import ListView
+
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        list_view = app.query_one(ListView)
+
+        # Initial mount: 3 sessions. DOM and state must agree.
+        assert len(app._sid_by_row) == 3
+        assert len(list_view.children) == 3
+        assert list_view.index is not None
+        assert app._sid_by_row[list_view.index] in {"alpha-id", "beta-id", "gamma-id"}
+
+        # Add a session — forces cold path because the set changed.
+        _write_state(populated_dir, "delta-id", project_name="delta")
+        await app._refresh_table()
+        await pilot.pause()
+        assert len(app._sid_by_row) == 4
+        assert len(list_view.children) == 4
+        assert list_view.index is not None
+        assert 0 <= list_view.index < len(app._sid_by_row)
+
+        # Remove two sessions — cold path again, with cursor preserved if
+        # possible.
+        (populated_dir / "alpha-id.json").unlink()
+        (populated_dir / "beta-id.json").unlink()
+        await app._refresh_table()
+        await pilot.pause()
+        assert len(app._sid_by_row) == 2
+        assert len(list_view.children) == 2
+        assert list_view.index is not None
+        assert 0 <= list_view.index < len(app._sid_by_row)
+        # The sid the cursor points at must exist in our state mapping.
+        assert app._sid_by_row[list_view.index] in app._items_by_sid
+
+        # Drain to empty. Index goes to None, lengths stay aligned.
+        for sid in list(app._sid_by_row):
+            (populated_dir / f"{sid}.json").unlink()
+        await app._refresh_table()
+        await pilot.pause()
+        assert app._sid_by_row == []
+        assert len(list_view.children) == 0
+        assert list_view.index is None
+
+
+@pytest.mark.asyncio
+async def test_enter_with_filter_focused_jumps_and_dismisses_input(
+    populated_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pressing Enter while the filter input is focused must:
+      1. Hide the filter input (so j/k resume navigating the list).
+      2. Move focus back to the ListView.
+      3. Still invoke jump_to for the highlighted row.
+
+    The previous behavior left the input visible and focused — j/k stopped
+    working until the user found Esc, which felt like Enter was broken.
+    """
+    from textual.widgets import ListView
+
+    from claude_orchestrator.tmux import navigator
+
+    captured: list[AgentState] = []
+
+    def fake_jump(agent: AgentState) -> Any:
+        captured.append(agent)
+
+        class _Outcome:
+            ok = True
+            result = navigator.JumpResult.OK
+            detail = ""
+
+        return _Outcome()
+
+    monkeypatch.setattr(tui_app, "jump_to", fake_jump)
+
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        # Open the filter overlay and type something that matches.
+        app.action_filter()
+        await pilot.pause()
+        assert app._filter_input is not None
+        assert app._filter_input.display is True
+        assert app.focused is app._filter_input
+
+        await pilot.press("a")  # match "alpha"
+        await pilot.pause()
+        assert app._filter == "a"
+
+        # Press Enter while filter input is focused.
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(captured) >= 1, "Enter should still call jump_to"
+        # Input is hidden and focus is back on the list.
+        assert app._filter_input.display is False
+        list_view = app.query_one(ListView)
+        assert app.focused is list_view
+
+
+@pytest.mark.asyncio
+async def test_concurrent_refresh_calls_do_not_corrupt_state(
+    populated_dir: Path,
+) -> None:
+    """Two refreshes scheduled back-to-back must not interleave.
+
+    The set_interval timer fires every 500ms and a cold-path rebuild contains
+    two awaits (clear, mount). Without re-entrancy guarding, a second tick
+    could begin while the first is still building, both ending up writing to
+    `_sid_by_row` in a non-deterministic order.
+    """
+    import asyncio
+
+    from textual.widgets import ListView
+
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+
+        # Add a session so the next refresh hits the cold path.
+        _write_state(populated_dir, "delta-id", project_name="delta")
+
+        # Fire two refreshes "concurrently" — the second one must be a no-op
+        # while the first is in flight.
+        await asyncio.gather(app._refresh_table(), app._refresh_table())
+        await pilot.pause()
+
+        list_view = app.query_one(ListView)
+        assert len(app._sid_by_row) == len(list_view.children) == 4
+        assert list_view.index is not None
+        assert 0 <= list_view.index < len(app._sid_by_row)
+
+
+@pytest.mark.asyncio
+async def test_auto_follow_moves_cursor_to_externally_focused_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the user switches to another tmux client (e.g. clicks a Ghostty
+    window hosting session beta), cco's cursor should move to beta on the
+    next refresh — without the user touching the dashboard."""
+    sd = tmp_path / "sessions"
+    sd.mkdir()
+    monkeypatch.setenv("CCO_STATE_DIR", str(sd))
+    _write_state(sd, "alpha-id", project_name="alpha", tmux_pane="%10")
+    _write_state(sd, "beta-id", project_name="beta", tmux_pane="%20")
+    _write_state(sd, "gamma-id", project_name="gamma", tmux_pane="%30")
+
+    # Mutable holder so each test step can change what the stub returns
+    # without re-monkeypatching. Mount-time refreshes see None so they
+    # don't pre-arm _last_external_pane to a value the test cares about.
+    state = {"pane": None}
+
+    def fake_detect(_self_pane: str | None) -> str | None:
+        return state["pane"]
+
+    monkeypatch.setattr(tui_app, "detect_focused_external_pane", fake_detect)
+
+    app = CcoApp(manager=StateManager(sd))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        from textual.widgets import ListView
+
+        list_view = app.query_one(ListView)
+
+        # The user "switches" to a Ghostty showing session beta.
+        state["pane"] = "%20"
+        await app._refresh_table()
+        await pilot.pause()
+        assert app._sid_by_row[list_view.index] == "beta-id"
+
+        # Same pane on next refresh → user navigation must be respected.
+        # Move the cursor manually and confirm refresh leaves it alone.
+        list_view.index = (list_view.index + 1) % len(app._sid_by_row)
+        manual_pos = list_view.index
+        await app._refresh_table()
+        await pilot.pause()
+        assert list_view.index == manual_pos, (
+            "auto-follow must not override user navigation when external pane is unchanged"
+        )
+
+        # User switches Ghostty windows again — now to gamma. Cursor moves.
+        state["pane"] = "%30"
+        await app._refresh_table()
+        await pilot.pause()
+        assert app._sid_by_row[list_view.index] == "gamma-id"
+
+
+@pytest.mark.asyncio
+async def test_auto_follow_ignores_panes_with_no_matching_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the user focuses a tmux pane that isn't hosting any cco session
+    (e.g. a plain shell), we should NOT clobber the cursor — and we should
+    remember the pane so we don't re-evaluate it next tick."""
+    sd = tmp_path / "sessions"
+    sd.mkdir()
+    monkeypatch.setenv("CCO_STATE_DIR", str(sd))
+    _write_state(sd, "alpha-id", project_name="alpha", tmux_pane="%10")
+    _write_state(sd, "beta-id", project_name="beta", tmux_pane="%20")
+
+    monkeypatch.setattr(tui_app, "detect_focused_external_pane", lambda _self_pane: "%999")
+
+    app = CcoApp(manager=StateManager(sd))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        from textual.widgets import ListView
+
+        list_view = app.query_one(ListView)
+        # User picks the second row manually.
+        list_view.index = 1
+        await app._refresh_table()
+        await pilot.pause()
+        assert list_view.index == 1, "follow target had no matching session, must not move cursor"
+        # And the pane is now cached, so next refresh is a no-op too.
+        assert app._last_external_pane == "%999"
+
+
+@pytest.mark.asyncio
+async def test_auto_follow_silent_when_tmux_query_fails(
+    populated_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tmux subprocess failure inside the follow detector must not crash
+    the refresh loop nor move the cursor."""
+
+    def boom(_self_pane: str | None) -> str | None:
+        raise RuntimeError("tmux subprocess crashed")
+
+    monkeypatch.setattr(tui_app, "detect_focused_external_pane", boom)
+
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+        # If the exception leaked, we'd never have populated _sid_by_row.
+        assert len(app._sid_by_row) == 3
+
+
+@pytest.mark.asyncio
+async def test_enter_after_cold_path_rebuild_jumps_to_correct_session(
+    populated_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: a cold-path rebuild + Enter keypress must jump to the
+    sid that the cursor visually points at, not a stale or off-by-one one.
+    """
+    from claude_orchestrator.tmux import navigator
+
+    captured: list[AgentState] = []
+
+    def fake_jump(agent: AgentState) -> Any:
+        captured.append(agent)
+
+        class _Outcome:
+            ok = True
+            result = navigator.JumpResult.OK
+            detail = ""
+
+        return _Outcome()
+
+    monkeypatch.setattr(tui_app, "jump_to", fake_jump)
+
+    app = CcoApp(manager=StateManager(populated_dir))
+    async with app.run_test() as pilot:  # type: ignore[arg-type]
+        await pilot.pause()
+
+        # Force a cold-path rebuild by adding a session, then immediately
+        # Enter. With the async fix the cursor sid must match _sid_by_row[idx].
+        _write_state(populated_dir, "delta-id", project_name="delta")
+        await app._refresh_table()
+        await pilot.pause()
+
+        idx = app.query_one("ListView").index  # type: ignore[attr-defined]
+        assert idx is not None
+        expected_sid = app._sid_by_row[idx]
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(captured) >= 1
+        assert captured[-1].session_id == expected_sid

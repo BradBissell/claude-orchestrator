@@ -305,3 +305,90 @@ def test_kill_session_no_pid_no_tmux_just_unlinks(
     outcome = kill_session(agent, tmp_path)
     assert outcome.ok
     assert not state_file.exists()
+
+
+# ---- detect_focused_external_pane ----------------------------------------
+
+
+def _stub_tmux_responses(
+    monkeypatch: pytest.MonkeyPatch, list_clients: str, list_panes: str
+) -> None:
+    """Monkeypatch subprocess.run so the two tmux queries inside
+    detect_focused_external_pane return the given canned outputs."""
+
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        # args is ["tmux", "list-clients", "-F", ...] or list-panes variant.
+        if "list-clients" in args:
+            return subprocess.CompletedProcess(args, 0, list_clients, "")
+        if "list-panes" in args:
+            return subprocess.CompletedProcess(args, 0, list_panes, "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def test_detect_focused_picks_most_recently_active_external_client(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two clients on different sessions; ours has older activity. The
+    helper must return the OTHER client's active pane."""
+    _stub_tmux_responses(
+        monkeypatch,
+        list_clients=(
+            # tty | focused | activity | session
+            "/dev/pts/0||1700000000|cco-session\n"  # us, older
+            "/dev/pts/1||1700000500|work-session\n"  # external, newer
+        ),
+        list_panes=(
+            # session | pane_id | window_active | pane_active
+            "cco-session|%1|1|1\nwork-session|%5|1|1\nwork-session|%6|1|0\n"
+        ),
+    )
+    assert navigator.detect_focused_external_pane(self_pane="%1") == "%5"
+
+
+def test_detect_focused_prefers_focused_over_recent_activity(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When focus-events are on, an explicitly focused client wins over a
+    more-recently-typed-in one."""
+    _stub_tmux_responses(
+        monkeypatch,
+        list_clients=(
+            "/dev/pts/0||1700000000|cco-session\n"
+            "/dev/pts/1|1|1700000100|work-session\n"  # focused but quieter
+            "/dev/pts/2||1700000900|other-session\n"  # most recent activity
+        ),
+        list_panes=("cco-session|%1|1|1\nwork-session|%5|1|1\nother-session|%9|1|1\n"),
+    )
+    assert navigator.detect_focused_external_pane(self_pane="%1") == "%5"
+
+
+def test_detect_focused_returns_none_when_only_us(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the only attached client is the cco TUI itself, no external
+    target exists."""
+    _stub_tmux_responses(
+        monkeypatch,
+        list_clients="/dev/pts/0||1700000000|cco-session\n",
+        list_panes="cco-session|%1|1|1\n",
+    )
+    assert navigator.detect_focused_external_pane(self_pane="%1") is None
+
+
+def test_detect_focused_returns_none_when_tmux_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(navigator, "has_tmux", lambda: False)
+    assert navigator.detect_focused_external_pane(self_pane="%1") is None
+
+
+def test_detect_focused_returns_none_when_list_clients_fails(
+    fake_tmux_present: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 1, "", "tmux: no server")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert navigator.detect_focused_external_pane(self_pane="%1") is None

@@ -238,3 +238,90 @@ def kill_session(state: AgentState, state_dir: Path) -> KillOutcome:
     if not succeeded:
         return KillOutcome(False, "; ".join(failures) or "nothing to do")
     return KillOutcome(True, "; ".join(failures))
+
+
+# ---- "follow the user" helper: detect which pane the user is interacting
+# with from another tmux client (e.g. another Ghostty window) so the cco
+# dashboard can move its cursor to that session automatically. ------------
+
+
+def detect_focused_external_pane(self_pane: str | None = None) -> str | None:
+    """Return the pane_id the user is currently interacting with in any
+    tmux client OTHER than the one running cco itself, or None if it can't
+    be determined.
+
+    Selection logic:
+      1. List all tmux clients and their attached session.
+      2. For each client, look up that session's currently-active pane
+         (the pane the client would type into right now).
+      3. Drop clients whose active pane equals `self_pane` — those are
+         "us looking at the dashboard."
+      4. Prefer a client with `client_focused=1` (requires `set -g
+         focus-events on` and a focus-aware terminal — Ghostty qualifies);
+         otherwise fall back to the client with the most recent
+         `client_activity` (last keystroke timestamp).
+
+    `self_pane` should be the pane_id hosting the cco TUI — typically
+    `os.environ["TMUX_PANE"]` from the caller. If None, no exclusion is
+    applied (use case: cco running outside tmux altogether).
+
+    Returns None on any tmux failure, when no external client exists, or
+    when the focused pane couldn't be resolved.
+    """
+    if not has_tmux():
+        return None
+
+    clients = _run_tmux(
+        "list-clients",
+        "-F",
+        "#{client_tty}|#{client_focused}|#{client_activity}|#{client_session}",
+    )
+    if clients.returncode != 0 or not clients.stdout.strip():
+        return None
+
+    # session_name → active pane_id. One pass over `list-panes -a` is
+    # cheaper than a `display-message` per client and immune to TOCTOU
+    # between the two queries.
+    panes_proc = _run_tmux(
+        "list-panes",
+        "-a",
+        "-F",
+        "#{session_name}|#{pane_id}|#{window_active}|#{pane_active}",
+    )
+    if panes_proc.returncode != 0:
+        return None
+    active_pane_by_session: dict[str, str] = {}
+    for line in panes_proc.stdout.strip().splitlines():
+        parts = line.split("|")
+        if len(parts) != 4:
+            continue
+        session, pane_id, window_active, pane_active = parts
+        if window_active == "1" and pane_active == "1":
+            active_pane_by_session[session] = pane_id
+
+    candidates: list[tuple[bool, int, str]] = []  # (focused, activity, pane_id)
+    for line in clients.stdout.strip().splitlines():
+        parts = line.split("|", 3)
+        if len(parts) != 4:
+            continue
+        _tty, focused, activity, session = parts
+        pane = active_pane_by_session.get(session, "")
+        if not pane:
+            continue
+        if self_pane and pane == self_pane:
+            # That client is showing the cco TUI — that's "us," not the
+            # user looking somewhere else.
+            continue
+        try:
+            activity_int = int(activity) if activity else 0
+        except ValueError:
+            activity_int = 0
+        candidates.append((focused == "1", activity_int, pane))
+
+    if not candidates:
+        return None
+
+    # Prefer focused client; otherwise the most recently active.
+    focused_only = [c for c in candidates if c[0]]
+    pool = focused_only or candidates
+    return max(pool, key=lambda c: c[1])[2]
