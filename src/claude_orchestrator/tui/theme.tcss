@@ -98,6 +98,19 @@ SessionRow {
     padding: 0 1;
 }
 
+/* SpeechBar: mirrors the TTS engine. Sits between the toast and the
+ * Textual footer so karaoke text is the last visible content before
+ * the key hints. One header row + four message rows — the active
+ * sentence wraps freely; if it doesn't fill all four, upcoming
+ * sentences fill the remaining quietly. */
+
+#speech-bar {
+    height: 5;
+    background: $surface-alt;
+    color: $ink-dim;
+    padding: 0 1;
+}
+
 StatusToast {
     height: 1;
     background: $surface;

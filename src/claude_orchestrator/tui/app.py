@@ -19,6 +19,7 @@ Keep this file under ~400 lines — split widgets out the moment it grows.
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -32,22 +33,68 @@ from textual.containers import Container
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 from claude_orchestrator.account import AccountConfig, load_account_config
+from claude_orchestrator.account_usage import (
+    AccountFingerprint,
+    AccountUsage,
+    caps_for,
+    read_active_fingerprint,
+)
+from claude_orchestrator.account_usage import (
+    compute_usage as compute_account_usage,
+)
+from claude_orchestrator.account_usage import (
+    format_account_usage_segment as account_usage_segment,
+)
+from claude_orchestrator.account_usage import (
+    load_store as load_account_store,
+)
+from claude_orchestrator.account_usage import (
+    needs_refresh as account_anchor_needs_refresh,
+)
+from claude_orchestrator.account_usage import (
+    record_anchor as record_account_anchor,
+)
+from claude_orchestrator.account_usage import (
+    save_store as save_account_store,
+)
 from claude_orchestrator.constants import AgentStatus
+from claude_orchestrator.speech import SpeechWatcher
+from claude_orchestrator.speech_player import SpeechPlayer
 from claude_orchestrator.state.manager import StateManager
 from claude_orchestrator.state.models import AgentState, StatusSummary
 from claude_orchestrator.state.reconciler import reconcile
 from claude_orchestrator.summarizer import summarize_transcript
 from claude_orchestrator.summary_store import SummaryStore
 from claude_orchestrator.tmux.discover import enrich_state_files
-from claude_orchestrator.tmux.navigator import JumpResult, jump_to, kill_session
+from claude_orchestrator.tmux.navigator import (
+    JumpResult,
+    detect_focused_external_pane,
+    jump_to,
+    kill_session,
+)
 from claude_orchestrator.tui.activity import ActivitySampler
 from claude_orchestrator.tui.tokens import TokenTracker, format_tokens, transcript_path
-from claude_orchestrator.tui.widgets import HeaderBar, SessionRow
+from claude_orchestrator.tui.widgets import HeaderBar, SessionRow, SpeechBar
 from claude_orchestrator.tui.widgets.session_row import render_sparkline
+from claude_orchestrator.usage import (
+    DEFAULT_REFRESH_INTERVAL_SEC,
+    UsageSnapshot,
+    fetch_oauth_usage,
+    fetch_usage,
+    format_usage_segment,
+    load_cached_snapshot,
+    merge_with_previous,
+    write_cached_snapshot,
+)
 
 REFRESH_INTERVAL = 0.5  # seconds
 RECONCILE_INTERVAL = 30.0  # how often to sweep dead state files / reset stuck waits
 KILL_CONFIRM_WINDOW_SEC = 3.0  # second-press window to actually fire the kill
+# ccusage is local-transcript-driven (no rate limit), but each invocation
+# rescans hundreds of MB of JSONL — typical 3-5s. The transcripts only
+# update on assistant turn completion, so refreshing more often than this
+# is wasted I/O.
+USAGE_REFRESH_INTERVAL = DEFAULT_REFRESH_INTERVAL_SEC
 
 
 class StatusToast(Static):
@@ -71,6 +118,7 @@ class CcoApp(App[int]):
         Binding("r", "refresh", "refresh now"),
         Binding("x", "kill", "kill selected session"),
         Binding("s", "summarize", "summarize selected session"),
+        Binding("t", "jump_speaking", "jump to TTS speaking session"),
         Binding("n", "next_attention", "jump cursor to next PERM/WAIT/ERR row"),
         Binding("slash", "filter", "filter sessions by substring"),
         Binding("escape", "clear_filter", "clear filter", show=False),
@@ -87,6 +135,13 @@ class CcoApp(App[int]):
         self._toast: StatusToast | None = None
         self._header_bar: HeaderBar | None = None
         self._summary_line: Static | None = None
+        self._speech_bar: SpeechBar | None = None
+        # cco owns TTS playback when running. The watcher tails the
+        # speech log; the player is the FIFO queue + subprocess manager.
+        # When cco isn't running, the user's tts-speak-response hook
+        # plays directly (legacy fallback) — `cco speech install`
+        # disables the hook for users who want cco to be authoritative.
+        self._speech_player = SpeechPlayer(watcher=SpeechWatcher())
         self._activity = ActivitySampler()
         self._tokens = TokenTracker()
         self._account: AccountConfig = load_account_config()
@@ -96,6 +151,37 @@ class CcoApp(App[int]):
         self._kill_armed_at: float = 0.0
         self._filter: str = ""  # case-insensitive substring filter; "" = show all
         self._filter_input: Input | None = None
+        # Re-entrancy guard for _refresh_table. Cold-path DOM rebuilds await
+        # ListView.clear()/mount(); without this guard a 500ms timer tick
+        # firing mid-rebuild could interleave clears and mounts, leaving
+        # _sid_by_row out of sync with the actual children. action_jump would
+        # then map list_view.index → a stale or missing sid (the visible
+        # symptom: pressing Enter does nothing or jumps to the wrong pane).
+        self._refreshing: bool = False
+        # Most recently observed "external" tmux pane — i.e. the active
+        # pane in any tmux client OTHER than the one running cco. We move
+        # the cursor to the matching session whenever this changes, so a
+        # user switching to a Ghostty window that's hosting session X gets
+        # X auto-highlighted on the dashboard. We only react to CHANGES
+        # so user navigation (j/k) is never overridden mid-session.
+        self._last_external_pane: str | None = None
+        # Cache of TMUX_PANE so we don't re-read env every tick. Empty
+        # string → cco was launched outside tmux; the follow logic still
+        # works, it just can't exclude "us."
+        self._self_pane: str = os.environ.get("TMUX_PANE", "")
+        # Latest snapshot from ccusage. Hydrated from disk cache at
+        # construction time so reopening the TUI within ~2h shows numbers
+        # immediately instead of waiting 3-5s on the first ccusage scan.
+        # Refresh worker is fired in on_mount and on USAGE_REFRESH_INTERVAL.
+        self._usage: UsageSnapshot | None = load_cached_snapshot()
+        # Per-account anchor store + fingerprint of the current account.
+        # Loaded from disk so per-account percentages are immediate on
+        # TUI reopen — same warm-start rationale as the ccusage cache.
+        # ``_account_usage`` is the display-ready (anchor + delta) result;
+        # the worker recomputes it each tick.
+        self._account_store = load_account_store()
+        self._account_fingerprint: AccountFingerprint | None = None
+        self._account_usage: AccountUsage | None = None
 
     # ---- compose --------------------------------------------------------
 
@@ -112,18 +198,50 @@ class CcoApp(App[int]):
             yield self._filter_input
             self._toast = StatusToast("")
             yield self._toast
+            # SpeechBar mirrors the TTS engine. Sits above the Footer so
+            # the karaoke text is the last thing visible before the key
+            # hints — eyes naturally fall there mid-listening.
+            self._speech_bar = SpeechBar(self._manager, self._speech_player)
+            yield self._speech_bar
         yield Footer()
 
     # ---- lifecycle ------------------------------------------------------
 
-    def on_mount(self) -> None:
-        self._refresh_table()
+    async def on_mount(self) -> None:
+        await self._refresh_table()
         self.set_interval(REFRESH_INTERVAL, self._refresh_table)
         # Reconcile less often — disk I/O cost, and the state it cleans up
         # accumulates slowly. Run once at startup so a freshly opened TUI
         # immediately reflects the cleaned-up world.
         self._reconcile_now()
         self.set_interval(RECONCILE_INTERVAL, self._reconcile_now)
+        # Skip the immediate fetch when we already have a fresh-enough
+        # cached snapshot (loaded in __init__). Each ccusage scan is 3-5s
+        # of CPU and disk I/O, so warm-starting from cache cuts perceived
+        # TUI latency to zero. The hourly cache TTL is much longer than
+        # the 2-minute refresh — that's intentional: the cache is just for
+        # avoiding the cold scan on rapid TUI reopens, not the source of
+        # truth.
+        if self._usage is None or self._usage.error is not None:
+            self._fetch_usage_now()
+        self.set_interval(USAGE_REFRESH_INTERVAL, self._fetch_usage_now)
+        # 200ms tick: poll the speech log for new start/stop records,
+        # route them into the player's queue, and reap finished playback
+        # so the next queued item starts. Same cadence as the SpeechBar
+        # refresh — they read the same underlying state.
+        self.set_interval(0.2, self._tick_speech_player)
+
+    def _tick_speech_player(self) -> None:
+        """Drive the speech player. Wrapped in suppress so a transient
+        OSError tailing the log can never crash the dashboard."""
+        with contextlib.suppress(Exception):
+            self._speech_player.tick()
+
+    async def on_unmount(self) -> None:
+        # Tear down playback so closing the TUI doesn't leave an orphan
+        # kokoro+paplay running in the background.
+        with contextlib.suppress(Exception):
+            self._speech_player.stop_all()
 
     def _reconcile_now(self) -> None:
         """Sweep orphaned state files and reset stuck WAITING_* statuses.
@@ -136,84 +254,132 @@ class CcoApp(App[int]):
 
     # ---- data -----------------------------------------------------------
 
-    def _refresh_table(self) -> None:
+    async def _refresh_table(self) -> None:
         # DEAD sessions are hidden from the dashboard. The on-disk state file
         # is left alone; scan() will mark it DEAD again next tick if the
         # claude_pid is still missing, and a future cleanup pass can sweep it.
-        agents = [a for a in self._manager.scan() if a.status != AgentStatus.DEAD]
-        if self._filter:
-            agents = [a for a in agents if _agent_matches_filter(a, self._filter)]
-
-        # Sample CPU activity for every live session before rendering, so the
-        # SessionRow gets fresh sparkline data this tick. Prune buffers for
-        # pids that vanished so dead sessions don't leak memory.
-        live_pids = [a.claude_pid for a in agents if a.claude_pid is not None]
-        for pid in live_pids:
-            self._activity.sample(pid)
-        self._activity.prune(live_pids)
-
-        list_view = self.query_one(ListView)
-        new_sids = [a.session_id for a in agents]
-
-        # Path 1 — identical order. Just refresh row text in place.
-        if new_sids == self._sid_by_row and self._rows_by_sid:
-            self._update_rows(agents)
-            self._maybe_summarize_new(agents)
-            self._update_chrome(agents)
+        if self._refreshing:
             return
+        self._refreshing = True
+        try:
+            agents = [a for a in self._manager.scan() if a.status != AgentStatus.DEAD]
+            # StateManager.scan() sorts by last_event_time desc, which makes
+            # the list reorder every time any session fires a hook event —
+            # disorienting when you're trying to keep your eye on a row. The
+            # dashboard sorts by (started_at, session_id) ascending instead:
+            # existing rows never shift, and new sessions append at the
+            # bottom. session_id breaks ties for sessions started in the
+            # same second so the order is fully deterministic.
+            agents.sort(key=lambda a: (a.started_at, a.session_id))
+            if self._filter:
+                agents = [a for a in agents if _agent_matches_filter(a, self._filter)]
 
-        # Path 2 — same set, different order. Refresh text and reorder rows
-        # via move_child so the widget tree isn't torn down. This is the
-        # dominant refresh case: sort-by-last_event_time means any hook fire
-        # rearranges the list, which used to fall through to the cold path's
-        # clear()+rebuild and produce a visible flash every few seconds.
-        new_set = set(new_sids)
-        prev_set = set(self._sid_by_row)
-        if self._rows_by_sid and new_set == prev_set and len(new_sids) == len(self._sid_by_row):
-            cursor_sid = self._cursor_sid(list_view)
-            self._update_rows(agents)
-            self._reorder_list_view(list_view, new_sids)
+            # Sample CPU activity for every live session before rendering, so
+            # the SessionRow gets fresh sparkline data this tick. Prune
+            # buffers for pids that vanished so dead sessions don't leak.
+            live_pids = [a.claude_pid for a in agents if a.claude_pid is not None]
+            for pid in live_pids:
+                self._activity.sample(pid)
+            self._activity.prune(live_pids)
+
+            list_view = self.query_one(ListView)
+            new_sids = [a.session_id for a in agents]
+
+            # If the user just switched their terminal focus (e.g. clicked a
+            # different Ghostty window hosting session X) auto-highlight that
+            # session. follow_sid is None when nothing changed; we apply it
+            # on top of whatever cursor each path computes, so user-driven
+            # j/k navigation is preserved between focus switches.
+            follow_sid = self._compute_follow_target(agents)
+
+            # Path 1 — identical order. Just refresh row text in place.
+            if new_sids == self._sid_by_row and self._rows_by_sid:
+                self._update_rows(agents)
+                self._apply_follow_target(list_view, follow_sid, new_sids)
+                self._maybe_summarize_new(agents)
+                self._update_chrome(agents)
+                return
+
+            # Path 2 — same set, different order. Refresh text and reorder rows
+            # via move_child so the widget tree isn't torn down. This is the
+            # dominant refresh case: sort-by-last_event_time means any hook
+            # fire rearranges the list, which used to fall through to the
+            # cold path's clear()+rebuild and produce a visible flash every
+            # few seconds.
+            new_set = set(new_sids)
+            prev_set = set(self._sid_by_row)
+            if self._rows_by_sid and new_set == prev_set and len(new_sids) == len(self._sid_by_row):
+                cursor_sid = self._cursor_sid(list_view)
+                self._update_rows(agents)
+                self._reorder_list_view(list_view, new_sids)
+                self._sid_by_row = list(new_sids)
+                if cursor_sid is not None:
+                    with contextlib.suppress(ValueError):
+                        list_view.index = new_sids.index(cursor_sid)
+                self._apply_follow_target(list_view, follow_sid, new_sids)
+                self._maybe_summarize_new(agents)
+                self._update_chrome(agents)
+                return
+
+            # Cold path — sessions added or removed. Build the new widget
+            # tree first, THEN swap the DOM and the index/state mappings
+            # together so action_jump never sees a half-updated dashboard.
+            #
+            # Why awaits matter here: ListView.clear()/mount() return
+            # AwaitRemove/AwaitMount and the actual DOM mutation happens on
+            # the next event-loop tick. The previous code fired both calls
+            # synchronously and then set _sid_by_row + list_view.index
+            # immediately, leaving a window in which list_view.index was
+            # None (clear sets it None) but _sid_by_row was the new list —
+            # so an Enter keypress landing in that window read index=None
+            # and toasted "no row selected" even though the list looked
+            # populated. With awaits + atomic post-swap, that window is
+            # gone: either both see the OLD state or both see the NEW.
+            prev_sid: str | None = self._cursor_sid(list_view)
+
+            new_rows: dict[str, SessionRow] = {}
+            new_items: dict[str, ListItem] = {}
+            items: list[ListItem] = []
+            cursor_target = 0
+            speaking_sid = self._speaking_sid()
+            for i, agent in enumerate(agents):
+                row = SessionRow()
+                row.update_agent(
+                    agent,
+                    samples=self._activity.samples_for(agent.claude_pid),
+                    summary=self._summaries.get(agent.session_id),
+                    tokens=self._tokens.total_for(agent),
+                    speaking=(agent.session_id == speaking_sid),
+                )
+                item = ListItem(row)
+                items.append(item)
+                new_rows[agent.session_id] = row
+                new_items[agent.session_id] = item
+                if prev_sid and agent.session_id == prev_sid:
+                    cursor_target = i
+
+            await list_view.clear()
+            if items:
+                await list_view.mount(*items)
+
+            # DOM is consistent — swap state mappings + index atomically.
             self._sid_by_row = list(new_sids)
-            if cursor_sid is not None:
-                with contextlib.suppress(ValueError):
-                    list_view.index = new_sids.index(cursor_sid)
+            self._rows_by_sid = new_rows
+            self._items_by_sid = new_items
+            if items:
+                list_view.index = cursor_target
+            else:
+                list_view.index = None
+
+            self._apply_follow_target(list_view, follow_sid, new_sids)
             self._maybe_summarize_new(agents)
             self._update_chrome(agents)
-            return
-
-        # Cold path — sessions added or removed. Preserve cursor by sid.
-        prev_sid: str | None = self._cursor_sid(list_view)
-
-        list_view.clear()
-        self._sid_by_row = []
-        self._rows_by_sid = {}
-        self._items_by_sid = {}
-
-        cursor_target = 0
-        for i, agent in enumerate(agents):
-            row = SessionRow()
-            row.update_agent(
-                agent,
-                samples=self._activity.samples_for(agent.claude_pid),
-                summary=self._summaries.get(agent.session_id),
-                tokens=self._tokens.total_for(agent),
-            )
-            item = ListItem(row)
-            list_view.append(item)
-            self._sid_by_row.append(agent.session_id)
-            self._rows_by_sid[agent.session_id] = row
-            self._items_by_sid[agent.session_id] = item
-            if prev_sid and agent.session_id == prev_sid:
-                cursor_target = i
-
-        if self._sid_by_row:
-            list_view.index = cursor_target
-
-        self._maybe_summarize_new(agents)
-        self._update_chrome(agents)
+        finally:
+            self._refreshing = False
 
     def _update_rows(self, agents: list[AgentState]) -> None:
         """Refresh in-place row content for every cached SessionRow."""
+        speaking_sid = self._speaking_sid()
         for agent in agents:
             row = self._rows_by_sid.get(agent.session_id)
             if row is not None:
@@ -221,7 +387,18 @@ class CcoApp(App[int]):
                     agent,
                     samples=self._activity.samples_for(agent.claude_pid),
                     summary=self._summaries.get(agent.session_id),
+                    speaking=(agent.session_id == speaking_sid),
                 )
+
+    def _speaking_sid(self) -> str | None:
+        """Session id whose response is currently being read aloud, if any.
+
+        Reads through the SpeechBar so we don't double-decode the speech
+        log: the bar already maintains a fresh _state on its 200ms tick.
+        """
+        if self._speech_bar is None:
+            return None
+        return self._speech_bar.speaking_session_id
 
     def _reorder_list_view(self, list_view: ListView, target_order: list[str]) -> None:
         """Reorder ListView children to match target_order without rebuilding.
@@ -253,6 +430,48 @@ class CcoApp(App[int]):
             return self._sid_by_row[idx]
         except IndexError:
             return None
+
+    def _compute_follow_target(self, agents: list[AgentState]) -> str | None:
+        """Return the sid to auto-highlight this tick, or None for no change.
+
+        Detects the active pane in any tmux client OTHER than ours and, if
+        it changed since last tick, returns the sid of the matching agent
+        (or None if no agent owns that pane). We only react to changes so
+        the user's j/k navigation isn't clobbered every 500ms.
+        """
+        # Tmux query is blocking I/O; swallow any failure. The dashboard
+        # should keep working even if tmux flaps.
+        try:
+            external_pane = detect_focused_external_pane(self._self_pane or None)
+        except Exception:  # noqa: BLE001 — tmux subprocess is best-effort
+            return None
+        if external_pane is None or external_pane == self._last_external_pane:
+            # Either tmux had nothing useful to report, or the user hasn't
+            # switched terminals since the last tick. Either way, leave the
+            # cursor alone — j/k presses must not be silently overridden.
+            return None
+        self._last_external_pane = external_pane
+        for agent in agents:
+            if agent.tmux_pane == external_pane:
+                return agent.session_id
+        # External focus changed but no cco session lives in that pane
+        # (e.g. user pulled up a shell window). Don't move the cursor;
+        # we still updated _last_external_pane so we won't keep retrying
+        # against the same pane on every tick.
+        return None
+
+    def _apply_follow_target(
+        self, list_view: ListView, follow_sid: str | None, new_sids: list[str]
+    ) -> None:
+        """Move the cursor to follow_sid if it's in the visible list.
+
+        Silent on failure: the filter may have hidden the sid, or the row
+        may not exist yet. The next refresh tick will retry.
+        """
+        if follow_sid is None:
+            return
+        with contextlib.suppress(ValueError):
+            list_view.index = new_sids.index(follow_sid)
 
     def _maybe_summarize_new(self, agents: list[AgentState]) -> None:
         """Lazy-once: kick off a summary for any session we haven't summarized yet.
@@ -286,19 +505,21 @@ class CcoApp(App[int]):
                     self._activity,
                     self._tokens,
                     weekly_cap=self._account.weekly_cap_tokens,
+                    usage=self._usage,
+                    account_usage=self._account_usage,
                 )
             )
         self.sub_title = f"{len(agents)} session(s)"
 
     # ---- actions --------------------------------------------------------
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
+    async def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Backstop for Enter: ListView's own Selected event also fires the jump."""
         del event  # unused
-        self.action_jump()
+        await self.action_jump()
 
-    def action_refresh(self) -> None:
-        self._refresh_table()
+    async def action_refresh(self) -> None:
+        await self._refresh_table()
         self._set_toast("refreshed")
 
     def action_filter(self) -> None:
@@ -309,27 +530,34 @@ class CcoApp(App[int]):
         self._filter_input.value = self._filter
         self._filter_input.focus()
 
-    def action_clear_filter(self) -> None:
+    async def action_clear_filter(self) -> None:
         """Hide the filter input and reset the filter. Bound to escape."""
         self._filter = ""
         if self._filter_input is not None:
             self._filter_input.value = ""
             self._filter_input.display = False
         self.query_one(ListView).focus()
-        self._refresh_table()
+        await self._refresh_table()
 
-    def on_input_changed(self, event: Input.Changed) -> None:
+    async def on_input_changed(self, event: Input.Changed) -> None:
         """Live-filter as the user types in the filter input."""
         if self._filter_input is None or event.input is not self._filter_input:
             return
         self._filter = event.value
-        self._refresh_table()
+        await self._refresh_table()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Pressing Enter in the filter input commits the filter and returns
-        focus to the list."""
+        """Backstop for Enter while the filter input is focused.
+
+        The priority `enter` binding (action_jump) currently consumes the
+        Enter keystroke before this fires, but action_jump now hides the
+        input itself. This handler is left in place as belt-and-braces so
+        that any future binding change (or platform where the priority
+        binding doesn't fire first) still gets the filter dismissed.
+        """
         if self._filter_input is None or event.input is not self._filter_input:
             return
+        self._filter_input.display = False
         self.query_one(ListView).focus()
 
     def action_cursor_down(self) -> None:
@@ -377,7 +605,7 @@ class CcoApp(App[int]):
         target_status = status_by_sid.get(target_sid, AgentStatus.IDLE)
         self._set_toast(f"→ {target_sid[:8]} ({target_status.value})")
 
-    def action_kill(self) -> None:
+    async def action_kill(self) -> None:
         """Two-press kill: first press arms, second within 3s fires.
 
         Killing tears down the claude process, the tmux window, and the
@@ -423,7 +651,7 @@ class CcoApp(App[int]):
             self._set_toast(f"killed {label}{note}")
         else:
             self._set_toast(f"kill failed: {outcome.detail}")
-        self._refresh_table()
+        await self._refresh_table()
 
     def action_summarize(self) -> None:
         """Force-refresh the summary for the highlighted session.
@@ -453,8 +681,23 @@ class CcoApp(App[int]):
             return
         self._summarize(sid, agent.cwd, manual=True)
 
-    def action_jump(self) -> None:
+    async def action_jump(self) -> None:
         list_view = self.query_one(ListView)
+
+        # If the user pressed Enter while the filter input was focused, we
+        # interpret that as "commit the filter and jump to the highlighted
+        # match." The priority `enter` binding fires this action BEFORE
+        # Input.Submitted gets a chance, so unless we close the input here
+        # the filter stays open with focus, and j/k stop navigating —
+        # exactly the symptom the user reports as "Enter is broken".
+        if (
+            self._filter_input is not None
+            and self._filter_input.display
+            and self.focused is self._filter_input
+        ):
+            self._filter_input.display = False
+            list_view.focus()
+
         idx = list_view.index
         try:
             sid = self._sid_by_row[idx] if idx is not None else None
@@ -496,11 +739,38 @@ class CcoApp(App[int]):
                 if refreshed is not None:
                     outcome = jump_to(refreshed)
                     if outcome.ok:
-                        self._refresh_table()
+                        await self._refresh_table()
                         self._set_toast(
                             f"→ jumped to {refreshed.project_name or sid[:8]} (auto-discovered)"
                         )
                         return
+        self._set_toast(_jump_error(outcome.result, outcome.detail))
+
+    async def action_jump_speaking(self) -> None:
+        """Jump to whichever session is currently being read aloud by TTS.
+
+        Reads the SpeechBar's current speaker — a small indirection that
+        keeps the speech-state computation out of this module. If no
+        session is speaking, surface that as a toast rather than silently
+        no-oping; users press `t` precisely when they expect a jump.
+        """
+        sid: str | None = None
+        if self._speech_bar is not None:
+            sid = self._speech_bar.speaking_session_id
+        if not sid:
+            self._set_toast("no session speaking")
+            return
+        agent = next(
+            (a for a in self._manager.scan() if a.session_id == sid),
+            None,
+        )
+        if agent is None:
+            self._set_toast(f"speaking session {sid[:8]} not in dashboard yet")
+            return
+        outcome = jump_to(agent)
+        if outcome.ok:
+            self._set_toast(f"→ jumped to {agent.project_name or sid[:8]} (speaking)")
+            return
         self._set_toast(_jump_error(outcome.result, outcome.detail))
 
     # ---- utilities ------------------------------------------------------
@@ -508,6 +778,102 @@ class CcoApp(App[int]):
     def _set_toast(self, text: str) -> None:
         if self._toast is not None:
             self._toast.update(text)
+
+    def _fetch_usage_now(self) -> None:
+        """Schedule a usage fetch in a worker thread (fire-and-forget)."""
+        self._fetch_usage()
+
+    @work(thread=True, exit_on_error=False, group="usage", exclusive=True)
+    def _fetch_usage(self) -> None:
+        """Background worker: ccusage scan + per-account anchor management.
+
+        ``exclusive=True`` collapses overlapping ticks — ccusage runs are
+        3-5s so a slow tick can still be in flight when the next fires.
+
+        Pipeline each tick:
+          1. ccusage blocks + weekly (always — fast feedback for the strip).
+          2. Read active fingerprint from ``.credentials.json``.
+          3. If fingerprint changed since last tick OR the latest anchor
+             for this account is stale, hit ``/api/oauth/usage`` once and
+             record a new anchor (rate limit is ~1/hr/account so this is
+             well within budget).
+          4. Compute display-ready per-account usage = anchor + ccusage
+             delta extrapolation.
+
+        All the disk I/O (cache writes, store saves) runs here on the
+        worker thread so the UI thread only sees the final dataclass.
+        """
+        snapshot = fetch_usage(five_hour_cap_tokens=self._account.five_hour_cap_tokens)
+        fp = read_active_fingerprint()
+        account_usage = self._refresh_account_anchor(fp, snapshot)
+        self.call_from_thread(self._on_usage_done, snapshot, fp, account_usage)
+
+    def _refresh_account_anchor(
+        self,
+        fp: AccountFingerprint | None,
+        ccusage: UsageSnapshot,
+    ) -> AccountUsage | None:
+        """Anchor management on the worker thread. Returns the display-ready
+        AccountUsage (or None when API-key user / no anchor possible).
+
+        Side-effects: may add an entry to ``self._account_store`` and
+        persist via ``save_account_store``. We mutate the store in-place
+        because the TUI's only reader is the UI-thread render path which
+        reads ``self._account_usage`` (a frozen dataclass), not the store.
+        """
+        if fp is None:
+            return None
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        now = _dt.now(_UTC)
+        state = self._account_store.get(fp.fp)
+        # Refresh trigger: fingerprint not yet seen, anchor stale, or its
+        # window rolled over. The endpoint is per-account rate-limited so
+        # this is naturally bounded — switching accounts only fires one
+        # extra request total.
+        if account_anchor_needs_refresh(state, now=now):
+            oauth = fetch_oauth_usage()
+            if oauth.error is None and oauth.five_hour_pct is not None:
+                state = record_account_anchor(
+                    self._account_store,
+                    fp,
+                    server_5h_pct=oauth.five_hour_pct,
+                    server_7d_pct=oauth.seven_day_pct or 0.0,
+                    server_5h_resets_at=oauth.five_hour_resets_at,
+                    server_7d_resets_at=oauth.seven_day_resets_at,
+                    ccusage_5h_tokens=ccusage.five_hour.tokens if ccusage.five_hour else 0,
+                    ccusage_7d_tokens=ccusage.seven_day.tokens if ccusage.seven_day else 0,
+                    now=now,
+                )
+                save_account_store(self._account_store)
+        # Resolve per-profile config caps; user intent beats inference.
+        cfg_5h, cfg_7d = caps_for(fp, self._account.profiles)
+        return compute_account_usage(
+            state,
+            ccusage_5h_tokens=ccusage.five_hour.tokens if ccusage.five_hour else None,
+            ccusage_7d_tokens=ccusage.seven_day.tokens if ccusage.seven_day else None,
+            config_5h_cap=cfg_5h or self._account.five_hour_cap_tokens,
+            config_7d_cap=cfg_7d or self._account.weekly_cap_tokens,
+            now=now,
+        )
+
+    def _on_usage_done(
+        self,
+        snapshot: UsageSnapshot,
+        fp: AccountFingerprint | None,
+        account_usage: AccountUsage | None,
+    ) -> None:
+        """Main-thread callback: stash the snapshots for the next render tick.
+
+        Merge rule for the cross-account strip: a transient ccusage failure
+        shouldn't blank a good reading. Per-account usage is replaced
+        wholesale because its anchor + delta math is internally consistent.
+        """
+        self._usage = merge_with_previous(snapshot, self._usage)
+        write_cached_snapshot(snapshot)
+        self._account_fingerprint = fp
+        self._account_usage = account_usage
 
     @work(thread=True, exit_on_error=False, group="summarize")
     def _summarize(self, sid: str, cwd: str, manual: bool) -> None:
@@ -610,8 +976,17 @@ def _render_summary_line(
     sampler: ActivitySampler | None = None,
     tokens: TokenTracker | None = None,
     weekly_cap: int | None = None,
+    usage: UsageSnapshot | None = None,
+    account_usage: AccountUsage | None = None,
 ) -> str:
-    """Bottom strip: active-count + aggregate sparkline + token total + cap."""
+    """Bottom strip: active-count + aggregate sparkline + token total + cap.
+
+    When per-account anchor data is available (``account_usage`` non-None)
+    the strip displays authoritative server-anchored percentages with
+    ``[account-label] 5h: 47% · 47m  7d: 8% · 5d``. Otherwise it falls
+    back to the cross-account ccusage strip — useful while we're waiting
+    on the first anchor or when the user is on an API-key auth.
+    """
     active = summary.working + summary.attention
     aggregate: list[float] = []
     if agents and sampler:
@@ -650,7 +1025,14 @@ def _render_summary_line(
         )
     else:
         tok_segment = f"[dim]tokens: {tok_text}[/]"
-    return f"[bold #00ffff]●[/] [bold]{active}[/] active   [#00ffff]{spark}[/]   {tok_segment}"
+    line = f"[bold #00ffff]●[/] [bold]{active}[/] active   [#00ffff]{spark}[/]   {tok_segment}"
+    if account_usage is not None:
+        line = f"{line}   {account_usage_segment(account_usage)}"
+    else:
+        usage_segment = format_usage_segment(usage, weekly_cap=weekly_cap)
+        if usage_segment:
+            line = f"{line}   {usage_segment}"
+    return line
 
 
 def _agent_matches_filter(agent: AgentState, needle: str) -> bool:

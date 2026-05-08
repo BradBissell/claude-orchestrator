@@ -25,12 +25,14 @@ def state_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]
     state = tmp_path / "sessions"
     pending = tmp_path / "pending"
     lock = tmp_path / "locks"
+    speech_log = tmp_path / "speech.jsonl"
     env = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "HOME": str(tmp_path),
         "CCO_STATE_DIR": str(state),
         "CCO_PENDING_DIR": str(pending),
         "CCO_LOCK_DIR": str(lock),
+        "CCO_SPEECH_LOG": str(speech_log),
     }
     return env
 
@@ -431,3 +433,142 @@ def test_populate_tmux_mapping_passes_stdin_through_on_empty_tmux_output() -> No
     body = '{"session_id":"x","status":"WORKING"}'
     out = _run_populate_tmux_mapping(body, tmux_body='echo ""')
     assert json.loads(out) == json.loads(body)
+
+
+# ---- speech-event log emission -------------------------------------------
+
+
+def _write_transcript(path: Path, assistant_text: str) -> None:
+    """Write a minimal Claude Code transcript JSONL with one assistant message."""
+    rec = {
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": assistant_text}]},
+    }
+    path.write_text(json.dumps(rec) + "\n")
+
+
+def _wait_for_speech_log(path: Path, timeout: float = 6.0) -> list[dict[str, object]]:
+    """Poll for the backgrounded speech-event subshell to flush. Returns the
+    parsed records once at least one start event has landed, or raises."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            try:
+                lines = path.read_text().strip().splitlines()
+            except OSError:
+                lines = []
+            records = [json.loads(line) for line in lines if line.strip()]
+            if any(r.get("event") == "start" for r in records):
+                return records
+        time.sleep(0.2)
+    raise AssertionError(f"speech log {path} never gained a start event")
+
+
+def test_stop_hook_appends_speech_start_event(state_env: dict[str, str], tmp_path: Path) -> None:
+    """Stop hook must read the assistant text from the transcript and emit a
+    start record to the speech log so the TUI's SpeechBar can mirror TTS."""
+    transcript = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript, "First sentence. Second one!")
+    sid = "speech-sess-1"
+    result = _fire_hook(
+        {
+            "session_id": sid,
+            "hook_event_name": "Stop",
+            "cwd": "/tmp/myproject",
+            "transcript_path": str(transcript),
+        },
+        state_env,
+    )
+    assert result.returncode == 0, result.stderr
+
+    speech_log = Path(state_env["CCO_SPEECH_LOG"])
+    records = _wait_for_speech_log(speech_log)
+    starts = [r for r in records if r.get("event") == "start"]
+    assert len(starts) >= 1
+    rec = starts[-1]
+    assert rec["session_id"] == sid
+    assert "First sentence." in rec["text"]  # type: ignore[operator]
+    assert isinstance(rec["sentences"], list)
+    assert rec["sentences"]  # non-empty
+    assert "speed" in rec
+
+
+def test_user_prompt_submit_appends_speech_stop_event(
+    state_env: dict[str, str],
+) -> None:
+    """A new user prompt cancels in-flight TTS — the speech log must reflect
+    that immediately so the bar clears without waiting for the
+    estimated-duration timeout."""
+    sid = "speech-sess-2"
+    _fire_hook(
+        {
+            "session_id": sid,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/tmp/myproject",
+            "prompt": "another prompt",
+        },
+        state_env,
+    )
+    speech_log = Path(state_env["CCO_SPEECH_LOG"])
+    assert speech_log.is_file(), "UPS must write the speech log inline"
+    records = [json.loads(line) for line in speech_log.read_text().strip().splitlines()]
+    assert any(r.get("event") == "stop" and r.get("session_id") == sid for r in records)
+
+
+def test_speech_max_chars_env_extends_cap(state_env: dict[str, str], tmp_path: Path) -> None:
+    """CCO_SPEECH_MAX_CHARS must override the default cap so users with
+    longer-form responses can have the full text mirrored on the bar."""
+    long_text = "Sentence one. " + ("filler word " * 400) + "Done."  # ~5000 chars
+    transcript = tmp_path / "transcript-long.jsonl"
+    _write_transcript(transcript, long_text)
+    sid = "speech-long"
+    env = dict(state_env)
+    env["CCO_SPEECH_MAX_CHARS"] = "6000"
+    _fire_hook(
+        {
+            "session_id": sid,
+            "hook_event_name": "Stop",
+            "cwd": "/tmp/x",
+            "transcript_path": str(transcript),
+        },
+        env,
+    )
+    speech_log = Path(env["CCO_SPEECH_LOG"])
+    records = _wait_for_speech_log(speech_log)
+    starts = [r for r in records if r.get("event") == "start"]
+    assert len(starts) >= 1
+    text = starts[-1]["text"]
+    assert isinstance(text, str)
+    # Pre-fix this would be capped at 1500; with the env override and a
+    # long enough source, we should retain well beyond the legacy cap.
+    assert len(text) > 1500
+
+
+def test_stop_hook_skips_speech_event_when_transcript_missing(
+    state_env: dict[str, str], tmp_path: Path
+) -> None:
+    """No transcript_path → no speech record, but the hook must still exit
+    cleanly and the session state must transition to IDLE."""
+    sid = "speech-sess-3"
+    result = _fire_hook(
+        {"session_id": sid, "hook_event_name": "Stop", "cwd": "/tmp/x"},
+        state_env,
+    )
+    assert result.returncode == 0
+    state = _read_state(state_env, sid)
+    assert state["status"] == "IDLE"
+
+    import time
+
+    # Give the would-be background subshell a moment to fail/exit. With
+    # no transcript_path it returns immediately, so the log file should
+    # not be created at all.
+    time.sleep(0.3)
+    speech_log = Path(state_env["CCO_SPEECH_LOG"])
+    if speech_log.is_file():
+        # If it does exist (e.g. from a prior fire in the same env), at
+        # least confirm we didn't add a bogus start record.
+        records = [json.loads(line) for line in speech_log.read_text().strip().splitlines()]
+        assert not any(r.get("event") == "start" and r.get("session_id") == sid for r in records)

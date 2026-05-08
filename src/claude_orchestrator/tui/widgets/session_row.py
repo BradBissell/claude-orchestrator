@@ -78,6 +78,7 @@ class SessionRow(Static):
         samples: list[float] | None = None,
         summary: str | None = None,
         tokens: int | None = None,
+        speaking: bool = False,
     ) -> None:
         symbol, label, color = STATUS_DISPLAY[agent.status]
         spark = render_sparkline(samples or [])
@@ -103,7 +104,14 @@ class SessionRow(Static):
         else:
             summary_cell = f"[dim]{'—':<{_SUMMARY_COL_WIDTH}}[/]"
 
+        # Speaking marker: a 1-char left accent (▌) in cyan when this row
+        # is the TTS source. A leading space when silent — ALWAYS 2 chars
+        # of prefix so column alignment never shifts as the speaker
+        # changes. Subtler than an emoji and matches the native TUI feel.
+        speak_prefix = "[bold #00ffff]▌[/] " if speaking else "  "
+
         primary = (
+            f"{speak_prefix}"
             f"[{color}]{symbol} {label:<4}[/] "
             f"[bold]{agent.project_name or '—':<20}[/] "
             f"{summary_cell} "

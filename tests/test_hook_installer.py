@@ -260,3 +260,113 @@ def test_restore_backup_with_no_backup_returns_none(
 ) -> None:
     # No prior install → no backups exist.
     assert installer.restore_backup() is None
+
+
+# ---------------------------------------------------------------------------
+# speech install (handing TTS playback to cco)
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_tts_and_cco_hooks(handler: Path) -> dict:
+    """Mimic a user's settings.json that has both cco's event_handler.sh
+    AND tts-speak-response wired to the Stop hook."""
+    return {
+        "hooks": {
+            "Stop": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f'CCO_EVENT=Stop "{handler}"',
+                            "async": True,
+                        },
+                        {
+                            "type": "command",
+                            "command": "~/.claude/hooks/tts-speak-response",
+                            "async": True,
+                        },
+                    ],
+                },
+            ],
+            "UserPromptSubmit": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "tts-stop 2>/dev/null; exit 0",
+                            "async": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+
+def test_speech_install_removes_only_tts_entries(settings_path: Path, fake_handler: Path) -> None:
+    settings_path.write_text(json.dumps(_settings_with_tts_and_cco_hooks(fake_handler)))
+    plan = installer.install_speech(dry_run=False)
+
+    assert plan.affected_events == ["Stop"]
+    assert any("tts-speak-response" in c for c in plan.affected_commands)
+
+    after = json.loads(settings_path.read_text())
+    stop_inner = after["hooks"]["Stop"][0]["hooks"]
+    # cco's event_handler stays.
+    assert any("event_handler" in str(h.get("command", "")) for h in stop_inner)
+    # tts-speak-response is gone.
+    assert not any("tts-speak-response" in str(h.get("command", "")) for h in stop_inner)
+    # tts-stop on UserPromptSubmit is unrelated to tts-speak-response and
+    # must NOT be touched by `speech install`.
+    ups_inner = after["hooks"]["UserPromptSubmit"][0]["hooks"]
+    assert any("tts-stop" in str(h.get("command", "")) for h in ups_inner)
+
+
+def test_speech_install_dry_run_writes_nothing(settings_path: Path, fake_handler: Path) -> None:
+    raw = json.dumps(_settings_with_tts_and_cco_hooks(fake_handler))
+    settings_path.write_text(raw)
+    plan = installer.install_speech(dry_run=True)
+    assert plan.affected_events == ["Stop"]
+    assert plan.backup_path is None
+    assert settings_path.read_text() == raw
+
+
+def test_speech_install_no_op_when_no_tts_hook(settings_path: Path, fake_handler: Path) -> None:
+    """User who never set up tts-speak-response should get a clean no-op."""
+    installer.install(dry_run=False)  # only cco's hooks present
+    plan = installer.install_speech(dry_run=False)
+    assert plan.affected_events == []
+    assert plan.backup_path is None
+
+
+def test_speech_install_drops_event_when_tts_was_only_hook(
+    settings_path: Path, fake_handler: Path
+) -> None:
+    """A user with ONLY tts-speak-response on Stop: removing it should
+    delete the empty Stop list AND drop hooks entirely if it's the only
+    event left, so the resulting JSON is minimal."""
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "~/.claude/hooks/tts-speak-response",
+                                    "async": True,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    installer.install_speech(dry_run=False)
+    after = json.loads(settings_path.read_text())
+    assert "hooks" not in after, "Stop should be dropped, then empty hooks dict removed"

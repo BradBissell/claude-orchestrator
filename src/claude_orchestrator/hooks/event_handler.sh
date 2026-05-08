@@ -244,6 +244,154 @@ populate_tmux_mapping() {
     '. + {tmux_session: $s, tmux_window: $w, tmux_pane: $p}'
 }
 
+# --- speech-event log (TTS karaoke bar) -----------------------------------
+# Writes start/stop records to $CCO_SPEECH_LOG so the TUI's SpeechBar widget
+# can mirror what the user's TTS engine is reading aloud and let them jump
+# to the speaking session with one keystroke.
+#
+# Emission strategy:
+#   * Stop:              spawn emit_speech_start in a backgrounded subshell
+#                        (it polls the transcript for up to 3s — must NOT
+#                        block the main hook's <15ms latency budget).
+#   * UserPromptSubmit:  append a stop record inline (cheap; no transcript).
+#
+# Failure mode is silent — the main event_handler still exits 0 via the
+# fail-OPEN trap regardless of whether speech logging succeeds.
+
+speech_log_path() {
+  if [ -n "${CCO_SPEECH_LOG:-}" ]; then
+    printf '%s' "$CCO_SPEECH_LOG"
+  else
+    printf '%s/claude-orchestrator/speech.jsonl' "${XDG_STATE_HOME:-$HOME/.local/state}"
+  fi
+}
+
+speech_append_locked() {
+  # Append $1 (a single JSON line, NO trailing newline expected) to the
+  # speech log under flock, so concurrent Stop hooks from multiple sessions
+  # never interleave half-lines.
+  local payload="$1"
+  local log lock dir
+  log="$(speech_log_path)"
+  lock="${log}.lock"
+  dir="$(dirname "$log")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  ( flock -x 9; printf '%s\n' "$payload" >> "$log" ) 9>"$lock" 2>/dev/null || true
+}
+
+emit_speech_stop_event() {
+  local sid="$1"
+  [ -z "$sid" ] && return 0
+  local ts record
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+  record="$(jq -nc --arg ts "$ts" --arg sid "$sid" \
+    '{event: "stop", ts: $ts, session_id: $sid}' 2>/dev/null)" || return 0
+  speech_append_locked "$record"
+}
+
+emit_speech_start_event() {
+  # Runs in a backgrounded subshell. Re-parses the hook JSON ($1) rather
+  # than relying on the parent's top-level vars, since the parent may have
+  # exited by the time we get here.
+  local hook_json="$1"
+  local sid transcript
+  sid="$(printf '%s' "$hook_json" | jq -r '.session_id // empty' 2>/dev/null)"
+  transcript="$(printf '%s' "$hook_json" | jq -r '.transcript_path // empty' 2>/dev/null)"
+  [ -z "$sid" ] && return 0
+  [ -z "$transcript" ] && return 0
+  [ ! -f "$transcript" ] && return 0
+
+  # Wait up to ~3s for the assistant message to flush to the transcript.
+  # Mirrors tts-speak-response's polling so we capture the same text the
+  # user actually hears.
+  local prev_size=-1 size
+  for _ in 1 2 3 4 5 6; do
+    size="$(stat -c %s "$transcript" 2>/dev/null || echo 0)"
+    if [ "$size" = "$prev_size" ] && [ "$size" -gt 0 ]; then
+      break
+    fi
+    prev_size="$size"
+    sleep 0.5
+  done
+
+  local text
+  text="$(jq -rs '
+    [.[] | select(.type == "assistant")
+         | .message.content[]?
+         | select(.type == "text")
+         | .text] | last // empty
+  ' "$transcript" 2>/dev/null)"
+  [ -z "$text" ] && return 0
+
+  # Markdown cleanup + sentence split. Done in Python because the regex
+  # surface is annoying in pure jq/awk and tts-speak-response already
+  # uses the same cleanup recipe — keep them in sync.
+  #
+  # NOTE: text is passed via argv (sys.argv[3]) rather than stdin. We can't
+  # `printf | python3 - args <<HEREDOC` because the heredoc binds to
+  # python3 but stdin is already taken by the pipe — the script body
+  # would be silently empty. Argv works because Linux ARG_MAX is ≥128 KB
+  # and our text is capped at 1500 chars upstream.
+  command -v python3 >/dev/null 2>&1 || return 0
+  local payload
+  payload="$(python3 -c '
+import json, os, re, sys
+from datetime import datetime, timezone
+
+sid = sys.argv[1]
+try:
+    speed = float(sys.argv[2])
+except ValueError:
+    speed = 1.3
+raw = sys.argv[3] if len(sys.argv) > 3 else ""
+
+# Cap on the *bar* text. To actually HEAR more, the user must also raise
+# the cap inside ~/.claude/hooks/tts-speak-response (the kokoro pipeline
+# truncates independently). Default 4000 — about 4 minutes at speed 1.3.
+try:
+    max_chars = max(1, int(os.environ.get("CCO_SPEECH_MAX_CHARS", "4000")))
+except ValueError:
+    max_chars = 4000
+
+t = re.sub(r"```.*?```", " (code block) ", raw, flags=re.DOTALL)
+t = re.sub(r"`[^`]+`", "", t)
+t = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", t)
+t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)
+t = re.sub(r"^#+\s*", "", t, flags=re.MULTILINE)
+t = re.sub(r"^[\*\-]\s+", "", t, flags=re.MULTILINE)
+t = re.sub(r"[*_~]", "", t)
+t = re.sub(r"\s+", " ", t).strip()[:max_chars]
+if not t:
+    sys.exit(0)
+
+parts = re.split(r"(?<=[.!?])\s+", t)
+out, buf = [], ""
+for p in parts:
+    if not p:
+        continue
+    if buf and len(buf) + len(p) + 1 < 240:
+        buf = (buf + " " + p).strip()
+    else:
+        if buf:
+            out.append(buf)
+        buf = p
+if buf:
+    out.append(buf)
+
+ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+sys.stdout.write(json.dumps({
+    "event": "start",
+    "ts": ts,
+    "session_id": sid,
+    "text": t,
+    "sentences": out,
+    "speed": speed,
+}, separators=(",", ":")))
+' "$sid" "${KOKORO_SPEED:-1.3}" "$text" 2>/dev/null)"
+  [ -z "$payload" ] && return 0
+  speech_append_locked "$payload"
+}
+
 # --- event branches -------------------------------------------------------
 case "$EVENT_NAME" in
   SessionStart)
@@ -252,6 +400,13 @@ case "$EVENT_NAME" in
 
   SessionEnd | Stop | StopFailure)
     apply_status "IDLE"
+    if [ "$EVENT_NAME" = "Stop" ]; then
+      # Background-spawn so the up-to-3s transcript poll doesn't blow the
+      # main hook's <15ms latency budget. setsid + nohup + redirect detach
+      # the subshell from this hook process group.
+      ( emit_speech_start_event "$INPUT_JSON" ) </dev/null >/dev/null 2>&1 &
+      disown 2>/dev/null || true
+    fi
     ;;
 
   PreToolUse)
@@ -332,6 +487,10 @@ case "$EVENT_NAME" in
     base_state \
       | jq -c --arg s "$PROMPT_TRIM" '. + {last_summary: $s}' \
       | write_state
+    # New prompt cancels in-flight TTS via tts-stop in user's hooks; mirror
+    # that intent in the speech log so the bar clears immediately instead
+    # of waiting for the estimated-duration timeout to expire.
+    emit_speech_stop_event "$SESSION_ID"
     ;;
 
   SubagentStart | SubagentStop)

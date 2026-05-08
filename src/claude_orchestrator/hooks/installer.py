@@ -345,3 +345,130 @@ def restore_backup() -> Path | None:
 def latest_backup_path() -> Path | None:
     """Public helper for the CLI's --restore-backup --dry-run path."""
     return _latest_backup(claude_settings_path())
+
+
+# ---------------------------------------------------------------------------
+# Speech-ownership: hand TTS playback over to cco.
+# ---------------------------------------------------------------------------
+
+# What we recognise as the user's existing TTS hook. Substring match against
+# the hook entry's command string — captures both `tts-speak-response`
+# and any `.kokoro` / `.piper` siblings the user might invoke.
+TTS_HOOK_MARKER = "tts-speak-response"
+
+
+@dataclass(frozen=True)
+class SpeechInstallPlan:
+    """What `cco speech install` *would* remove from settings.json."""
+
+    settings_path: Path
+    affected_events: list[str]
+    affected_commands: list[str]
+    backup_path: Path | None
+
+    def summary(self) -> str:
+        lines = [
+            f"settings.json: {self.settings_path}",
+            f"backup:        {self.backup_path or '(dry-run, none written)'}",
+            "",
+        ]
+        if self.affected_events:
+            lines.append(
+                "will remove tts-speak-response hooks from: " + ", ".join(self.affected_events)
+            )
+            for cmd in self.affected_commands:
+                lines.append(f"  - {cmd}")
+        else:
+            lines.append("nothing to do — no tts-speak-response hooks present.")
+        return "\n".join(lines)
+
+
+def _command_invokes_tts(cmd: object) -> bool:
+    return isinstance(cmd, str) and TTS_HOOK_MARKER in cmd
+
+
+def plan_speech_install() -> SpeechInstallPlan:
+    """Compute (without applying) what `cco speech install` would do."""
+    settings_path = claude_settings_path()
+    settings = _load_settings(settings_path)
+    hooks_root = settings.get("hooks") or {}
+
+    affected_events: list[str] = []
+    affected_cmds: list[str] = []
+    for event, entries in hooks_root.items():
+        if not isinstance(entries, list):
+            continue
+        event_matched = False
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            for h in e.get("hooks") or []:
+                if isinstance(h, dict) and _command_invokes_tts(h.get("command")):
+                    affected_cmds.append(h["command"])
+                    event_matched = True
+        if event_matched:
+            affected_events.append(event)
+    return SpeechInstallPlan(
+        settings_path=settings_path,
+        affected_events=sorted(set(affected_events)),
+        affected_commands=affected_cmds,
+        backup_path=None,
+    )
+
+
+def install_speech(*, dry_run: bool = False) -> SpeechInstallPlan:
+    """Remove tts-speak-response from every hook in settings.json so cco's
+    SpeechPlayer is the single TTS path. Atomic write + backup, same
+    discipline as `cco init` / `cco uninstall`."""
+    plan = plan_speech_install()
+    if dry_run or not plan.affected_events:
+        return plan
+
+    settings_path = plan.settings_path
+    backup = _make_backup(settings_path)
+    settings = _load_settings(settings_path)
+    hooks_root = settings.get("hooks", {})
+
+    for event in list(hooks_root.keys()):
+        entries = hooks_root.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept: list[dict[str, Any]] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                kept.append(e)
+                continue
+            # Filter the inner hooks list — keep siblings (e.g. cco's own
+            # event_handler.sh stays put when both hooks share an entry),
+            # drop only commands matching TTS_HOOK_MARKER.
+            inner = e.get("hooks") or []
+            kept_inner = [
+                h
+                for h in inner
+                if not (isinstance(h, dict) and _command_invokes_tts(h.get("command")))
+            ]
+            if kept_inner:
+                new_entry = dict(e)
+                new_entry["hooks"] = kept_inner
+                kept.append(new_entry)
+            # else: entry empty after removal — drop entirely.
+        if kept:
+            hooks_root[event] = kept
+        else:
+            del hooks_root[event]
+
+    if not hooks_root:
+        settings.pop("hooks", None)
+
+    _atomic_write(
+        settings_path,
+        json.dumps(settings, indent=2, sort_keys=False) + "\n",
+        mode=0o600,
+    )
+
+    return SpeechInstallPlan(
+        settings_path=plan.settings_path,
+        affected_events=plan.affected_events,
+        affected_commands=plan.affected_commands,
+        backup_path=backup,
+    )

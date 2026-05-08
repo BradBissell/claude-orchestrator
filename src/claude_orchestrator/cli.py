@@ -73,6 +73,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser("tui", help="Launch the Textual TUI dashboard (P6)")
 
+    speech_p = subparsers.add_parser(
+        "speech",
+        help="Manage TTS playback ownership (cco vs. ~/.claude/hooks/tts-speak-response)",
+    )
+    speech_sub = speech_p.add_subparsers(dest="speech_command", metavar="<command>")
+    speech_install_p = speech_sub.add_parser(
+        "install",
+        help=(
+            "Hand TTS playback to cco: removes the tts-speak-response Stop hook "
+            "from settings.json so cco's queue is the single source of audio."
+        ),
+    )
+    speech_install_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print which hook entries would be removed without writing.",
+    )
+
     return parser
 
 
@@ -105,6 +123,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_doctor()
     if args.command == "tui":
         return _cmd_tui()
+    if args.command == "speech":
+        sub = getattr(args, "speech_command", None)
+        if sub == "install":
+            return _cmd_speech_install(dry_run=bool(args.dry_run))
+        # No subcommand → show help.
+        parser.parse_args(["speech", "--help"])
+        return 0
 
     print(
         f"cco: subcommand '{args.command}' is not implemented yet "
@@ -221,6 +246,34 @@ def _cmd_init(*, dry_run: bool) -> int:
         print("\n[dry-run] no changes written.")
     elif plan.events_to_add:
         print("\nDone. Restart any active Claude Code sessions to pick up the new hooks.")
+    return 0
+
+
+def _cmd_speech_install(*, dry_run: bool) -> int:
+    """Hand TTS playback to cco by removing the user's tts-speak-response
+    Stop hook from settings.json. cco's SpeechPlayer becomes the sole TTS
+    path while the dashboard is running."""
+    if os.geteuid() == 0:
+        print("cco: refusing to run as root.", file=sys.stderr)
+        return 3
+    from claude_orchestrator.hooks import installer
+
+    plan = installer.install_speech(dry_run=dry_run)
+    print(plan.summary())
+    if dry_run:
+        print("\n[dry-run] no changes written.")
+        return 0
+    if plan.affected_events:
+        print(
+            "\nDone. cco now owns TTS playback. While the cco TUI is open, "
+            "the speech queue plays one session at a time (same-session "
+            "follow-ups preempt the in-flight reply)."
+        )
+        print(
+            "Heads-up: closing the cco TUI also stops audio. Re-add "
+            "tts-speak-response to your Stop hooks (e.g. via the backup "
+            "above) if you want playback when cco isn't running."
+        )
     return 0
 
 
