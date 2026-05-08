@@ -184,3 +184,62 @@ def test_falls_back_to_mtime_when_timestamp_unparseable(
 
     result = reconciler.reconcile(tmp_path, file_stale_sec=60)
     assert result.deleted == 1
+
+
+# ---- resume residue cleanup --------------------------------------------
+
+
+def test_deletes_stale_resume_residue_when_pid_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two state files share a live PID (claude --resume case). The
+    older sibling is past the stale threshold → it should be deleted."""
+    monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: True)
+    new = tmp_path / "new.json"
+    old = tmp_path / "old.json"
+    _write(new, claude_pid=12345, last_event_time=_iso_seconds_ago(5))  # fresh
+    _write(old, claude_pid=12345, last_event_time=_iso_seconds_ago(120))  # stale
+
+    result = reconciler.reconcile(tmp_path, file_stale_sec=60)
+
+    assert new.exists(), "winning sibling must survive"
+    assert not old.exists(), "stale resume residue must be deleted"
+    assert result.deleted == 1
+
+
+def test_keeps_recent_resume_siblings_until_grace_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Right after a resume, both files are recent. We don't delete
+    immediately — give the user time to react / hooks to settle. The
+    in-memory dedup in scan() hides the duplicate from the dashboard
+    in the meantime."""
+    monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: True)
+    new = tmp_path / "new.json"
+    old = tmp_path / "old.json"
+    _write(new, claude_pid=12345, last_event_time=_iso_seconds_ago(5))
+    _write(old, claude_pid=12345, last_event_time=_iso_seconds_ago(20))  # not yet stale
+
+    result = reconciler.reconcile(tmp_path, file_stale_sec=60)
+
+    assert new.exists()
+    assert old.exists()
+    assert result.deleted == 0
+
+
+def test_distinct_live_pids_are_never_treated_as_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two separate claude processes (different PIDs) must both be
+    preserved indefinitely — no false-positive residue cleanup."""
+    monkeypatch.setattr(reconciler, "_is_pid_alive", lambda pid: True)
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    _write(a, claude_pid=1001, last_event_time=_iso_seconds_ago(1000))  # very old
+    _write(b, claude_pid=1002, last_event_time=_iso_seconds_ago(1000))
+
+    result = reconciler.reconcile(tmp_path, file_stale_sec=60)
+
+    assert a.exists()
+    assert b.exists()
+    assert result.deleted == 0

@@ -98,9 +98,14 @@ def reconcile(
         to IDLE (clears the stuck-prompt indicator the dashboard would
         otherwise highlight forever).
 
-    Files with live or missing `claude_pid` are left alone — the live ones
-    are healthy, the missing-pid ones predate hook coverage and require a
-    different recovery path (manual cleanup or `cco refresh-tmux`).
+    Files sharing a `claude_pid` (``claude --resume`` residue: same parent
+    process, fresh session_id):
+      - The most-recently-active sibling per pid is the real session.
+      - Older siblings are deleted if they've been idle for >file_stale_sec.
+
+    Files with live or missing `claude_pid` are otherwise left alone — the
+    live ones are healthy, the missing-pid ones predate hook coverage and
+    require a different recovery path (manual cleanup or `cco refresh-tmux`).
     """
     if not state_dir.is_dir():
         return ReconcileResult(deleted=0, reset=0)
@@ -108,20 +113,50 @@ def reconcile(
     deleted = 0
     reset = 0
 
+    # First pass — load everything so we can identify shared-PID groups.
+    # The set is tiny (one entry per active session), so the extra read
+    # is negligible vs the simplicity of grouping in-memory.
+    paths_data: list[tuple[Path, dict[str, Any]]] = []
     for path in state_dir.glob("*.json"):
-        # Skip atomic-write tempfiles from concurrent hook writes / our own
-        # earlier passes — they get cleaned up by their respective writers.
         if path.name.startswith(".tmp"):
             continue
         try:
             data = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
+        paths_data.append((path, data))
 
+    # Identify the "winning" file per live pid: most recent last_event_time.
+    # Anything else sharing that pid is resume residue.
+    winners_by_pid: dict[int, tuple[Path, str]] = {}
+    for path, data in paths_data:
         pid = data.get("claude_pid")
         if not isinstance(pid, int) or pid <= 0:
             continue
+        if not _is_pid_alive(pid):
+            continue
+        ts = str(data.get("last_event_time") or "")
+        existing = winners_by_pid.get(pid)
+        if existing is None or ts > existing[1]:
+            winners_by_pid[pid] = (path, ts)
+
+    for path, data in paths_data:
+        pid = data.get("claude_pid")
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+
         if _is_pid_alive(pid):
+            # Resume-residue check: a non-winning sibling for a live pid
+            # is an orphan — delete after the standard staleness grace.
+            winner = winners_by_pid.get(pid)
+            if winner is not None and winner[0] != path:
+                age = _last_event_age_seconds(data, path)
+                if age > file_stale_sec:
+                    try:
+                        path.unlink()
+                        deleted += 1
+                    except OSError as exc:
+                        log.warning("reconcile: could not unlink %s: %s", path, exc)
             continue
 
         age = _last_event_age_seconds(data, path)

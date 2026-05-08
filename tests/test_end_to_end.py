@@ -93,6 +93,20 @@ def test_full_pipeline(
     b = json.loads((state_dir / "e2e-session-B.json").read_text())
     assert b["status"] == "WAITING_PERMISSION"
 
+    # In production, two genuinely separate claude processes have
+    # distinct PIDs. This test harness fires hooks from the same pytest
+    # process so the handler walks up to the same non-shell ancestor for
+    # both — which now (correctly) trips the resume-residue dedup. Force
+    # distinct LIVE PIDs (test process + parent) so the dashboard sees
+    # two independent live sessions, matching what real concurrent claudes
+    # would produce.
+    import os as _os
+
+    a["claude_pid"] = _os.getpid()
+    b["claude_pid"] = _os.getppid()
+    (state_dir / "e2e-session-A.json").write_text(json.dumps(a))
+    (state_dir / "e2e-session-B.json").write_text(json.dumps(b))
+
     # cco status reports both.
     rc = main(["status"])
     out = capsys.readouterr().out

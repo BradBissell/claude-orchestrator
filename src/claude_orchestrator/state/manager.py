@@ -48,6 +48,14 @@ class StateManager:
         Sorted by `last_event_time` descending (most-recently-active first)
         so the user sees what changed most recently at the top of `cco list`.
         Corrupt files are logged at WARNING and skipped.
+
+        Resume dedup: ``claude --resume`` reuses the parent process's PID
+        but creates a new session_id, so each resume leaves an orphaned
+        state file that points at a still-alive PID. Stale-PID detection
+        (the existing ``_is_pid_alive`` check) can't catch this: BOTH
+        files reference the same live PID. We resolve the duplicate by
+        keeping the most-recently-active sibling and marking the rest
+        DEAD so the dashboard renders one row per live process.
         """
         if not self._dir.is_dir():
             return []
@@ -74,7 +82,34 @@ class StateManager:
             agents.append(agent)
 
         agents.sort(key=lambda a: a.last_event_time, reverse=True)
+        _mark_resume_residue_dead(agents)
         return agents
 
     def get_summary(self) -> StatusSummary:
         return StatusSummary.from_agents(self.scan())
+
+
+def _mark_resume_residue_dead(agents: list[AgentState]) -> None:
+    """Mark older siblings sharing a live ``claude_pid`` as DEAD.
+
+    Mutates ``agents`` in place. Caller must pre-sort by
+    ``last_event_time`` descending — the first agent encountered for a
+    given pid is treated as the live session, all others are
+    resume-residue and get the DEAD treatment so the dashboard hides
+    them. Disk-level cleanup happens in the reconciler on a longer
+    timer; this function is purely a render-time fix.
+
+    Agents already marked DEAD (dead PID) and agents without a
+    ``claude_pid`` are left untouched.
+    """
+    seen_live_pids: set[int] = set()
+    for agent in agents:
+        if agent.status == AgentStatus.DEAD:
+            continue
+        pid = agent.claude_pid
+        if not pid:
+            continue
+        if pid in seen_live_pids:
+            agent.status = AgentStatus.DEAD
+            continue
+        seen_live_pids.add(pid)
