@@ -10,6 +10,11 @@ which are still working, and which went idle.
 
 <img width="2806" height="1972" alt="image" src="https://github.com/user-attachments/assets/50f4b678-2da8-4ee1-b52e-3d148ce4ae7c" />
 
+
+Or use it side by side with the active tmux session:
+<img width="3838" height="2136" alt="image" src="https://github.com/user-attachments/assets/0f59b339-95e0-4189-8068-57bc53d1cdfd" />
+
+
 ## Why
 
 Running 10+ Claude Code sessions in parallel is normal now. tmux shows
