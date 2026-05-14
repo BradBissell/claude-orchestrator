@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from claude_orchestrator.config import state_dir
 
@@ -262,7 +263,7 @@ def read_current(path: Path | None = None, *, now_ms: int | None = None) -> Spee
     except OSError:
         return _NULL_STATE
 
-    active: dict | None = None
+    active: dict[str, Any] | None = None
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -328,7 +329,7 @@ def _parse_iso_ms(ts: str) -> int:
         return 0
 
 
-def _atomic_append(path: Path, record: dict) -> None:
+def _atomic_append(path: Path, record: dict[str, Any]) -> None:
     """flock + append. Truncates head if file grows past MAX_BYTES.
 
     Multiple Stop hooks firing in parallel must not interleave half-lines —
@@ -379,7 +380,7 @@ class SpeechWatcher:
     def path(self) -> Path:
         return self._path
 
-    def poll(self) -> list[dict]:
+    def poll(self) -> list[dict[str, Any]]:
         try:
             size = self._path.stat().st_size
         except OSError:
@@ -389,7 +390,7 @@ class SpeechWatcher:
             self._pos = 0
         if size == self._pos:
             return []
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         try:
             with self._path.open() as f:
                 f.seek(self._pos)

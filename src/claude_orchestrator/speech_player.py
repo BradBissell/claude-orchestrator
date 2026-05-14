@@ -41,6 +41,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from claude_orchestrator.speech import SpeechWatcher, estimated_duration_ms
 
@@ -79,7 +80,7 @@ class QueueItem:
 @dataclass
 class _PlaybackHandle:
     item: QueueItem
-    proc: subprocess.Popen | None  # None when playback couldn't start
+    proc: subprocess.Popen[bytes] | None  # None when playback couldn't start
     # Wall-clock time when `_start` spawned the subprocess. Used to
     # calibrate chars/sec on natural completion. 0.0 for items started
     # under the null spawner — those don't contribute to calibration.
@@ -88,13 +89,13 @@ class _PlaybackHandle:
 
 # Spawner signature: takes a QueueItem, returns a Popen (or None if it
 # couldn't start). Injected so tests can use a fake.
-Spawner = Callable[[QueueItem], "subprocess.Popen | None"]
+Spawner = Callable[[QueueItem], "subprocess.Popen[bytes] | None"]
 
 
 def _real_spawner(cmd: list[str]) -> Spawner:
     """Returns a Spawner that runs `cmd` with the item's text on stdin."""
 
-    def spawn(item: QueueItem) -> subprocess.Popen | None:
+    def spawn(item: QueueItem) -> subprocess.Popen[bytes] | None:
         try:
             return subprocess.Popen(  # noqa: S603 - command is operator-controlled
                 cmd,
@@ -111,7 +112,7 @@ def _real_spawner(cmd: list[str]) -> Spawner:
         except (OSError, ValueError):
             return None
 
-    def spawn_and_feed(item: QueueItem) -> subprocess.Popen | None:
+    def spawn_and_feed(item: QueueItem) -> subprocess.Popen[bytes] | None:
         proc = spawn(item)
         if proc is None or proc.stdin is None:
             return proc
@@ -233,7 +234,7 @@ class SpeechPlayer:
 
     # ---- internals -------------------------------------------------------
 
-    def _route_event(self, ev: dict) -> None:
+    def _route_event(self, ev: dict[str, Any]) -> None:
         sid = ev.get("session_id")
         if not isinstance(sid, str):
             return
@@ -352,7 +353,7 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _null_spawner(item: QueueItem) -> subprocess.Popen | None:
+def _null_spawner(item: QueueItem) -> subprocess.Popen[bytes] | None:
     """Used when no kokoro command is available — playback silently
     completes, preserving queue semantics for testing/headless CI."""
     return None

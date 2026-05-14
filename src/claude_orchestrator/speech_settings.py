@@ -21,6 +21,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 ENV_VAR = "CCO_TTS_ENABLED"
 
@@ -71,7 +72,7 @@ def load() -> SpeechSettings:
     calibration. Calibration is read from the file regardless of which
     layer (env/file/default) decides the enabled flag — env override
     only governs whether cco SPEAKS, not how it estimates rate."""
-    file_data: dict = {}
+    file_data: dict[str, Any] = {}
     p = settings_path()
     if p.is_file():
         try:
@@ -109,6 +110,8 @@ def load() -> SpeechSettings:
 def _coerce_calibrated_rate(value: object) -> float | None:
     if value is None:
         return None
+    if not isinstance(value, (int, float, str)):
+        return None
     try:
         rate = float(value)
     except (TypeError, ValueError):
@@ -135,7 +138,7 @@ def save(
     p.parent.mkdir(parents=True, exist_ok=True)
 
     # Preserve existing fields so partial updates don't drop them.
-    current: dict = {}
+    current: dict[str, Any] = {}
     if p.is_file():
         try:
             raw = json.loads(p.read_text())
